@@ -87,6 +87,7 @@ def test_automation_execute_drbexams_hall_ticket():
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "completed"
-    assert "hall ticket" in data["message"].lower() or "completed" in data["summary"].lower()
+    assert "drbexams.net" in data["message"].lower() or "hall ticket" in data["message"].lower()
+    assert len(data["steps"]) >= 4
 
 

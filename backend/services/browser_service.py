@@ -445,14 +445,22 @@ class BrowserService:
                         await lnk.first.click()
 
             download = await download_info.value
-            temp_path = await download.path()
-            filename = download.suggested_filename
-            size = os.path.getsize(temp_path) if temp_path and os.path.exists(temp_path) else 0
+            filename = download.suggested_filename or "downloaded_file.pdf"
+            downloads_dir = Path("downloads")
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            target_path = downloads_dir / filename
+            try:
+                await download.save_as(str(target_path.resolve()))
+                final_path = str(target_path.resolve())
+            except Exception:
+                temp_path = await download.path()
+                final_path = str(temp_path) if temp_path else ""
+            size = os.path.getsize(final_path) if final_path and os.path.exists(final_path) else 0
 
             logger.info("File downloaded successfully: %s (%d bytes)", filename, size)
             return {
                 "filename": filename,
-                "path": str(temp_path),
+                "path": final_path,
                 "size_bytes": size,
             }
         except Exception as exc:
