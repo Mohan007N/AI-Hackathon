@@ -130,18 +130,17 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         )
 
     if validation["overall_status"] == "review" and not body.userApproved:
-        reason = (
-            validation["website_validation"].get("reason")
-            or validation["prompt_validation"].get("reason")
-            or "Explicit user authorization required for this external website."
-        )
+        if validation["prompt_validation"].get("status") in {"uncertain", "malicious"}:
+            reason = validation["prompt_validation"].get("reason")
+        else:
+            reason = validation["website_validation"].get("reason") or "Explicit user authorization required for this external website."
         return AutomationExecuteResponse(
             status="needs_approval",
             message=f"Security Review: {reason}",
             summary=f"Authorization required: {reason}",
             steps=[
-                "Website URL verified as valid HTTPS",
-                "Prompt safety verified (ML + Rules)",
+                "Website URL verified",
+                "Prompt evaluated by Security Intelligence Engine",
                 f"Requires confirmation: {reason}",
                 "Awaiting user authorization in approval queue",
             ],

@@ -25,6 +25,9 @@ class SecurityConfig:
         "college-portal.example.com",
         "drbexams.net",
         "www.drbexams.net",
+        "172.16.37.58",
+        "localhost",
+        "127.0.0.1",
     ]
 
     @classmethod
@@ -94,5 +97,5 @@ class SecurityConfig:
     }
 
     # ── Blocked ports (non-standard suspicious) ───────────────────────────────
-    ALLOWED_PORTS: set[int | None] = {None, 80, 443, 8080, 8443}
+    ALLOWED_PORTS: set[int | None] = {None, 80, 443, 8000, 8080, 8443, 3000, 5173}
 

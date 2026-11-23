@@ -86,12 +86,20 @@ function randomSalt() {
 
 function checkWebsiteSafety(rawUrl) {
   let parsed
-  try { parsed = new URL(rawUrl.trim()) } catch { return { safe: false, reason: 'Enter a valid website URL, including https://.' } }
-  if (!['https:', 'http:'].includes(parsed.protocol) || !parsed.hostname.includes('.')) return { safe: false, reason: 'Enter a valid public website URL.' }
+  try { parsed = new URL(rawUrl.trim()) } catch { return { safe: false, reason: 'Enter a valid website URL, including https:// or http://.' } }
+  if (!['https:', 'http:'].includes(parsed.protocol)) return { safe: false, reason: 'Enter a valid website URL.' }
   if (parsed.username || parsed.password) return { safe: false, reason: 'Do not place login credentials inside the website URL. Use the secure sign-in details option instead.' }
   const privateQueryKey = [...parsed.searchParams.keys()].find(key => /(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key))
   if (privateQueryKey) return { safe: false, reason: 'This URL appears to contain a sign-in token or secret in its query string. Remove it and use the one-time sign-in details option instead.' }
-  if (parsed.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(parsed.hostname)) return { safe: false, reason: 'Use an HTTPS website so information is protected in transit.' }
+
+  const isPrivateOrLocal = ['localhost', '127.0.0.1'].includes(parsed.hostname) ||
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
+    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname)
+
+  if (parsed.protocol !== 'https:' && !isPrivateOrLocal) {
+    return { safe: false, reason: 'Use an HTTPS website so information is protected in transit (HTTP is only allowed for local or intranet portals).' }
+  }
   const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
   const match = BLOCKED_DOMAINS.find(item => host === item.domain || host.endsWith(`.${item.domain}`))
   if (match) {

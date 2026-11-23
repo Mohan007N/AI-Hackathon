@@ -66,6 +66,17 @@ class URLValidator:
                 url=url, checks_failed=["parse"],
             )
 
+        # ── 3. Hostname present ──────────────────────────────────────────────
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return URLValidationResult(
+                status="blocked", reason="URL has no hostname.",
+                url=url, checks_failed=["hostname"],
+            )
+
+        is_private = self._is_local_or_private_ip(hostname)
+        is_trusted = self._is_trusted_domain(hostname)
+
         # ── 2. Scheme ────────────────────────────────────────────────────────
         scheme = (parsed.scheme or "").lower()
         if scheme in SecurityConfig.BLOCKED_SCHEMES:
@@ -76,7 +87,10 @@ class URLValidator:
 
         if SecurityConfig.REQUIRE_HTTPS and scheme != "https":
             if scheme == "http":
-                failed.append("https_required")
+                if not (is_trusted or is_private):
+                    failed.append("https_required")
+                else:
+                    passed.append("http_allowed_for_trusted_portal")
             else:
                 return URLValidationResult(
                     status="blocked", reason=f"Invalid or missing URL scheme: '{scheme}'. HTTPS required.",
@@ -84,14 +98,6 @@ class URLValidator:
                 )
         else:
             passed.append("scheme")
-
-        # ── 3. Hostname present ──────────────────────────────────────────────
-        hostname = (parsed.hostname or "").lower()
-        if not hostname:
-            return URLValidationResult(
-                status="blocked", reason="URL has no hostname.",
-                url=url, checks_failed=["hostname"],
-            )
 
         # ── 4. Embedded credentials ──────────────────────────────────────────
         if parsed.username or parsed.password:
@@ -104,12 +110,16 @@ class URLValidator:
 
         # ── 5. IP-address URL ────────────────────────────────────────────────
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", hostname):
-            return URLValidationResult(
-                status="blocked",
-                reason="IP-address-based URL not allowed. Use a domain name.",
-                url=url, domain=hostname, checks_failed=["ip_address"],
-            )
-        passed.append("not_ip_address")
+            if is_trusted or is_private:
+                passed.append("trusted_ip_or_private_network")
+            else:
+                return URLValidationResult(
+                    status="blocked",
+                    reason="IP-address-based URL not allowed. Use a domain name.",
+                    url=url, domain=hostname, checks_failed=["ip_address"],
+                )
+        else:
+            passed.append("not_ip_address")
 
         # ── 6. Port check ───────────────────────────────────────────────────
         port = parsed.port
@@ -193,6 +203,25 @@ class URLValidator:
         return result
 
     # ── Internal ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_local_or_private_ip(hostname: str) -> bool:
+        """Check if hostname is localhost, loopback, or private IPv4 address (RFC 1918)."""
+        if hostname in {"localhost", "127.0.0.1"}:
+            return True
+        match = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$", hostname)
+        if match:
+            first = int(match.group(1))
+            second = int(match.group(2))
+            if first == 10:
+                return True
+            if first == 127:
+                return True
+            if first == 192 and second == 168:
+                return True
+            if first == 172 and 16 <= second <= 31:
+                return True
+        return False
 
     def _is_trusted_domain(self, hostname: str) -> bool:
         """Check if hostname matches or is a subdomain of a trusted domain."""
