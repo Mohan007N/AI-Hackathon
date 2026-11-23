@@ -9,22 +9,30 @@ An autonomous AI backend that lets students give natural-language instructions t
 ## Architecture
 
 ```
-React Frontend
+React Frontend (Portal URL + Username + Password + Task Prompt)
      │  REST / JSON
      ▼
 FastAPI Backend (main.py)
+  ├── routes/security_routes.py  ← PRE-EXECUTION: /api/security/validate
   ├── routes/task_routes.py      ← Start runs, get status
   ├── routes/agent_routes.py     ← Execute agent, poll logs
   ├── routes/approval_routes.py  ← Frontend approval UI (supplementary)
   └── routes/report_routes.py    ← Get & submit reports
         │
         ▼
-  services/task_manager.py       ← Orchestrates full workflow
+  Security Intelligence Layer
+    ├── services/url_validator.py         ← HTTPS, domain allowlist, IP/lookalike blocks
+    ├── services/credential_validator.py  ← Presence & safety format checks (NEVER leaked)
+    ├── services/prompt_validator.py      ← Combines deterministic rules + ML risk signal
+    └── ml/predictor.py                   ← TF-IDF + L2 Logistic Regression classifier
+        │
+        ▼
+  services/task_manager.py       ← Orchestrates approved agent workflow
     ├── portal_service.py        ← Organizer portal API client
     ├── llm_service.py           ← OpenRouter → structured action plan
     ├── browser_service.py       ← Playwright Chromium automation
-    ├── security_service.py      ← Prompt-injection detection
-    ├── approval_service.py      ← Official confirm.py gate
+    ├── security_service.py      ← Webpage DOM prompt-injection scanner
+    ├── approval_service.py      ← Official confirm.py gate (irreversible actions)
     └── report_service.py        ← Final report submission
         │
         ▼
@@ -38,42 +46,60 @@ FastAPI Backend (main.py)
 
 ```
 backend/
-├── main.py               FastAPI app + CORS + routers + health
-├── config.py             All env vars via python-dotenv
+├── main.py                    FastAPI app + CORS + routers + health
+├── config/
+│   ├── settings.py            All env vars via python-dotenv
+│   └── security_config.py     Trusted domains & security limits
+├── config.py                  Compatibility shim
 ├── requirements.txt
 ├── .env.example
 │
 ├── routes/
-│   ├── task_routes.py
-│   ├── agent_routes.py
-│   ├── approval_routes.py
-│   └── report_routes.py
+│   ├── security_routes.py     /api/security/validate & /api/security/task/start
+│   ├── task_routes.py         /api/task/start & status
+│   ├── agent_routes.py        /api/agent/execute & logs
+│   ├── approval_routes.py     /api/approval/respond
+│   └── report_routes.py       /api/report/submit
 │
 ├── services/
-│   ├── portal_service.py
-│   ├── llm_service.py
-│   ├── browser_service.py
-│   ├── security_service.py
-│   ├── approval_service.py
-│   ├── report_service.py
-│   └── task_manager.py
+│   ├── url_validator.py       URL security & domain allowlist validator
+│   ├── credential_validator.py Credential format & safe handling validator
+│   ├── prompt_validator.py    Rule-based + ML prompt safety validator
+│   ├── security_service.py    Webpage content injection detector
+│   ├── portal_service.py      Official organizer API client
+│   ├── llm_service.py         OpenRouter client (action planning)
+│   ├── browser_service.py     Playwright Chromium browser controller
+│   ├── approval_service.py    Official confirm.py integration gate
+│   ├── report_service.py      Report builder and submitter
+│   └── task_manager.py        Workflow orchestrator
 │
 ├── schemas/
-│   ├── task_schema.py
-│   ├── agent_schema.py
-│   ├── approval_schema.py
-│   └── report_schema.py
+│   ├── security_schema.py     Validation request/response models
+│   ├── task_schema.py         Task schemas
+│   ├── agent_schema.py        Agent action models
+│   ├── approval_schema.py     Approval models
+│   └── report_schema.py       Report models
+│
+├── ml/
+│   ├── train_classifier.py    TF-IDF + L2 Logistic Regression training
+│   ├── predictor.py           Fast inference predictor (< 2ms)
+│   └── models/                Serialized joblib artifacts
+│
+├── datasets/
+│   ├── generate_dataset.py    Synthetic generator (2,700+ diverse samples)
+│   └── prompt_security_dataset.csv
 │
 ├── utils/
-│   ├── action_logger.py    JSONL logger (no passwords ever logged)
-│   └── security_rules.py   9 deterministic injection rule sets
+│   ├── action_logger.py       JSONL logger (credentials scrubbed)
+│   └── security_rules.py      Deterministic regex rule engine
 │
-├── logs/                   Per-run JSONL action logs
+├── logs/                      Per-run JSONL action logs
 ├── tests/
-│   ├── test_health.py
-│   ├── test_security.py
-│   └── test_logger.py
-└── confirm.py              ← Place official organizer file here
+│   ├── test_health.py         Health & task API tests
+│   ├── test_security.py       Webpage security & task alignment tests
+│   ├── test_security_engine.py URL, credential, prompt, & ML tests
+│   └── test_logger.py         Action logger tests
+└── confirm.py                 Official organizer confirmation gate
 ```
 
 ---

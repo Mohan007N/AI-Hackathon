@@ -25,6 +25,7 @@ from routes.task_routes import router as task_router
 from routes.agent_routes import router as agent_router
 from routes.approval_routes import router as approval_router
 from routes.report_routes import router as report_router
+from routes.security_routes import router as security_router
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -78,6 +79,7 @@ app.include_router(task_router)
 app.include_router(agent_router)
 app.include_router(approval_router)
 app.include_router(report_router)
+app.include_router(security_router)
 
 
 # ── Global exception handler ───────────────────────────────────────────────────

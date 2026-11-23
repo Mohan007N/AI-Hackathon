@@ -58,7 +58,18 @@ class SecurityService:
         Check a proposed action string (from LLM or any internal module).
         Validates that the action is consistent with the student's original task.
         """
-        result = self._run_rules(action_description, context=f"proposed_action({source})")
+        ignore_rules: set[str] = set()
+        task_lower = student_task.lower()
+        if any(w in task_lower for w in ["pay", "payment", "fee"]):
+            ignore_rules.add("INJ-005")
+        if any(w in task_lower for w in ["drop", "deregister", "cancel", "remove"]):
+            ignore_rules.add("INJ-009")
+
+        result = self._run_rules(
+            action_description,
+            context=f"proposed_action({source})",
+            ignore_rules=ignore_rules,
+        )
         if result.is_safe:
             # Additional: check task alignment
             result = self._check_task_alignment(action_description, student_task, result)
@@ -80,9 +91,17 @@ class SecurityService:
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _run_rules(self, text: str, context: str) -> SecurityResult:
+    def _run_rules(
+        self,
+        text: str,
+        context: str,
+        ignore_rules: set[str] | None = None,
+    ) -> SecurityResult:
+        ignore_rules = ignore_rules or set()
         matched: list[SecurityRule] = []
         for rule in SECURITY_RULES:
+            if rule.rule_id in ignore_rules:
+                continue
             for pattern in rule.patterns:
                 if pattern.search(text):
                     matched.append(rule)

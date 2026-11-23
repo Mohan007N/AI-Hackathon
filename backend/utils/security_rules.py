@@ -62,8 +62,8 @@ SECURITY_RULES: list[SecurityRule] = [
         description="Webpage requests the agent to reveal passwords, OTPs, tokens or credentials.",
         severity=RuleSeverity.CRITICAL,
         patterns=_compile([
-            r"(reveal|send|output|print|show|display|expose|leak)\s+(the\s+)?(student'?s?\s+)?(password|otp|token|secret|credentials?|api[\s_-]?key)",
-            r"what\s+is\s+(the\s+)?(password|otp|token|secret)",
+            r"(reveal|send|output|print|show|display|expose|leak|give|tell)\b.{0,30}\b(password|otp|token|secret|credentials?|api[\s_-]?key)",
+            r"what\s+is\s+(the\s+)?(admin\s+|root\s+|student\s+)?(password|otp|token|secret)",
             r"(type|enter|fill)\s+(the\s+)?(password|otp)\s+(into|in|at)\s+(this|the|our|external)",
             r"send\s+credentials?\s+to",
         ]),
