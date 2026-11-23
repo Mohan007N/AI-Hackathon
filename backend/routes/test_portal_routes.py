@@ -189,3 +189,4 @@ async def register_elective(course_code: str = Form(default="OE162")):
 </html>""",
         status_code=200,
     )
+

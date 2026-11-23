@@ -89,6 +89,44 @@ class BrowserService:
         if not self._page:
             raise BrowserServiceError("Browser not started. Call start() first.")
 
+    @property
+    def page(self):
+        """Direct access to the underlying Playwright Page instance."""
+        return self._page
+
+    def as_page(self, page_cls):
+        """Instantiate any Page Object on the active Playwright page."""
+        self._require_page()
+        return page_cls(self._page)
+
+    @property
+    def login_page(self):
+        """Access LoginPage Page Object on current page."""
+        self._require_page()
+        from pages.login_page import LoginPage
+        return LoginPage(self._page)
+
+    @property
+    def dashboard_page(self):
+        """Access DashboardPage Page Object on current page."""
+        self._require_page()
+        from pages.dashboard_page import DashboardPage
+        return DashboardPage(self._page)
+
+    @property
+    def examination_page(self):
+        """Access ExaminationPage Page Object on current page."""
+        self._require_page()
+        from pages.examination_page import ExaminationPage
+        return ExaminationPage(self._page)
+
+    @property
+    def course_registration_page(self):
+        """Access CourseRegistrationPage Page Object on current page."""
+        self._require_page()
+        from pages.course_registration_page import CourseRegistrationPage
+        return CourseRegistrationPage(self._page)
+
     # ── Navigation & Tracking ─────────────────────────────────────────────────
 
     async def navigate(self, url: str) -> dict[str, Any]:
@@ -148,6 +186,15 @@ class BrowserService:
         self._require_page()
         await self.navigate(portal_url)
         await asyncio.sleep(0.5)
+
+        # 0. Attempt semantic Page Object Model login first if supported on this page
+        try:
+            if await self.login_page.is_on_page():
+                pom_success = await self.login_page.login(username, password, timeout_ms=5000)
+                if pom_success:
+                    return True
+        except Exception as pom_err:
+            logger.debug("POM login attempt bypassed; falling back to dynamic fuzzy locators: %s", pom_err)
 
         # 1. Fill Username (try label, placeholder, role, then common selectors)
         filled_user = False
