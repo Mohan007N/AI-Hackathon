@@ -76,12 +76,27 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         )
 
     # ── Step 1: Pre-Execution Security Validation ─────────────────────────────
-    validation = _security.validate_pre_execution(
-        website_url=effective_url,
-        username=effective_user,
-        password=effective_pass,
-        user_prompt=effective_prompt,
-    )
+    if effective_user or effective_pass:
+        validation = _security.validate_pre_execution(
+            website_url=effective_url,
+            username=effective_user,
+            password=effective_pass,
+            user_prompt=effective_prompt,
+        )
+    else:
+        # Public website / unauthenticated browsing: validate URL trust and prompt safety
+        url_res = _security._url_validator.validate(effective_url)
+        prompt_res = _security._prompt_validator.validate(effective_prompt)
+        overall = "blocked" if (url_res.status == "blocked" or prompt_res.status == "malicious") else (
+            "review" if (url_res.status == "review" or prompt_res.status == "uncertain") else "safe"
+        )
+        validation = {
+            "overall_status": overall,
+            "allowed_to_proceed": overall == "safe",
+            "website_validation": {"status": url_res.status, "reason": url_res.reason},
+            "prompt_validation": {"status": prompt_res.status, "reason": prompt_res.reason},
+            "credential_validation": {"status": "skipped", "reason": None},
+        }
 
     log_action(
         run_id=run_id,

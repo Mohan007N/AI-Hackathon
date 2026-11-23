@@ -94,7 +94,7 @@ class BrowserService:
     async def navigate(self, url: str) -> dict[str, Any]:
         """Navigate to URL and return metadata."""
         self._require_page()
-        if not url.startswith(("http://", "https://")):
+        if not url.startswith(("http://", "https://", "data:", "file://")):
             url = "https://" + url
 
         try:
@@ -110,6 +110,11 @@ class BrowserService:
             }
         except Exception as exc:
             raise BrowserServiceError(f"Navigation to {url} failed: {exc}") from exc
+
+    async def set_content(self, html: str) -> None:
+        """Set HTML content directly in the browser page."""
+        self._require_page()
+        await self._page.set_content(html, wait_until="domcontentloaded")
 
     async def get_current_url(self) -> str:
         self._require_page()
