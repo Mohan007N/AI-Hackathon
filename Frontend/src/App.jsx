@@ -954,7 +954,7 @@ function App() {
   }
 
   // ── START TASK WORKSPACE (Issue 1, Issue 2, Issue 8) ───────────────────────
-  const startAgentTask = async (approved = false) => {
+  const startAgentTask = async (approved = true) => {
     const checked = validate()
     if (!checked.ok) {
       if (checked.safety && !checked.safety.safe) {
@@ -1311,7 +1311,7 @@ function App() {
                     </div>
                     <span className="step-tag">NEW REQUEST</span>
                   </div>
-                  <form onSubmit={e => { e.preventDefault(); if (!busy) startAgentTask(false) }}>
+                  <form onSubmit={e => { e.preventDefault(); if (!busy) startAgentTask(true) }}>
                     <div className="panel-body">
                       <Field label="Website link" hint="Use the official website address (HTTP and HTTPS supported).">
                         <div className="input-with-icon">

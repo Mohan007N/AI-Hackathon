@@ -31,6 +31,10 @@ backend/logs/*
 logs/
 *.log
 
+# Downloads
+downloads/
+backend/downloads/
+
 # IDE / Editor files
 .vscode/
 .idea/

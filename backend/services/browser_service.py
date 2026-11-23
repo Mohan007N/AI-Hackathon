@@ -148,6 +148,11 @@ class BrowserService:
 
         try:
             response = await self._page.goto(url_clean, wait_until="domcontentloaded")
+            # Wait briefly for client-side JavaScript redirect or network to settle
+            try:
+                await self._page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
             current_url = self._page.url
             title = await self._page.title()
             self._navigation_history.append(current_url)
@@ -155,7 +160,7 @@ class BrowserService:
             # Requirement 11: Validate redirects
             from services.url_validator import URLValidator
             validator = URLValidator()
-            redirect_check = validator.validate_redirect(current_url, url_clean)
+            redirect_check = validator.validate_redirect(url_clean, current_url)
             if redirect_check.status == "blocked":
                 raise BrowserServiceError(f"Navigation blocked by redirect security policy: {redirect_check.reason}")
 
@@ -550,6 +555,10 @@ class BrowserService:
                 if await loc.count() > 0:
                     await loc.first.click()
                     await self._page.wait_for_load_state("domcontentloaded")
+                    try:
+                        await self._page.wait_for_load_state("networkidle", timeout=2500)
+                    except Exception:
+                        pass
                     return True
             except Exception as eid_err:
                 logger.debug("Direct click by element_id '%s' failed: %s", desc, eid_err)

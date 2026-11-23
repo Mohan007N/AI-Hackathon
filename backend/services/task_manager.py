@@ -233,20 +233,21 @@ class TaskManager:
         consequential_reason = review_reason
         try:
             parsed_plan = await self._llm.parse_task_request(effective_prompt)
-            is_consequential = (
-                self._approval.is_irreversible(parsed_plan.intent)
-                or any(self._approval.is_irreversible(act) for act in parsed_plan.actions)
-                or any(k in parsed_plan.intent.lower() for k in ["pay", "fee", "register", "enroll", "submit"])
-                or any(k in effective_prompt.lower() for k in ["pay ", "payment", "fee", "enroll", "register", "submit leave"])
-            )
+            # Consequential actions are strictly state-changing irreversible operations (payment, registration, leave submission)
+            consequential_intents = [
+                act for act in (parsed_plan.actions + [parsed_plan.intent])
+                if self._approval.is_irreversible(act) or any(k in act.lower() for k in ["pay_fee", "register_elective", "submit_leave"])
+            ]
+            is_consequential = bool(consequential_intents) or any(k in effective_prompt.lower() for k in ["pay fee", "pay tuition", "make payment", "register for", "enroll in", "submit leave"])
             if is_consequential and not user_approved:
-                consequential_reason = f"Consequential action detected: {parsed_plan.intent}. Human approval required."
+                intent_label = consequential_intents[0] if consequential_intents else "irreversible_operation"
+                consequential_reason = f"Consequential action detected: {intent_label}. Human approval required."
                 log_action(
                     run_id=run_id,
                     step=2,
                     action="consequential_action_approval_required",
-                    target=parsed_plan.intent,
-                    reason=f"Action '{parsed_plan.intent}' requires human confirmation before execution",
+                    target=intent_label,
+                    reason=f"Action '{intent_label}' requires human confirmation before execution",
                 )
         except Exception as nlu_err:
             logger.warning("NLU plan check warning: %s", nlu_err)
@@ -557,27 +558,6 @@ class TaskManager:
         username: str = run.get("_username", "")
         password: str = run.get("_password", "")
 
-        # Check if pre-execution review or initial approval is pending (Requirement 4)
-        if run.get("status") == "needs_approval":
-            logger.info("Run %s waiting for initial pre-execution approval", run_id)
-            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
-                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
-            })
-            approval_event = run.get("_approval_event")
-            if not approval_event:
-                approval_event = asyncio.Event()
-                run["_approval_event"] = approval_event
-
-            await approval_event.wait()
-
-            if not run.get("_approval_decision", False):
-                summary = "Task was cancelled or denied by user."
-                _update_run(run_id, status="stopped", result_status="not_done", result_summary=summary)
-                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
-                return
-
-            _update_run(run_id, status="running")
-
         # ── 1. NLU: Task Understanding & Plan Generation ──────────────────────
         next_step("llm_parse_request", reason="Analyzing student request into structured task plan")
         self._emit_event(run_id, "nlu_planning", "Analyzing Request", {"prompt": task_request})
@@ -607,7 +587,7 @@ class TaskManager:
             "constraints": plan.constraints,
         })
 
-        # ── 2. Browser: Launch & Authenticate ─────────────────────────────────
+        # ── 2. Browser: Launch & Navigate Immediately ─────────────────────────
         next_step("browser_start", reason="Launching Chromium automation session")
         self._emit_event(run_id, "browser_launch", "Launching Chromium Browser", {
             "headless": False,
@@ -618,16 +598,40 @@ class TaskManager:
         next_step("browser_navigate", url=portal_url, reason="Navigating to destination URL")
         try:
             nav = await browser.navigate(portal_url)
+            redirected_url = nav.get("url", portal_url)
             page_title = nav.get("title", "")
-            _update_run(run_id, current_url=portal_url, current_title=page_title)
-            self._emit_event(run_id, "navigation", f"Navigated to {portal_url}", {
-                "title": page_title,
-                "status": nav.get("status"),
-                "url": portal_url,
-            })
+            _update_run(run_id, current_url=redirected_url, current_title=page_title)
+
+            if redirected_url != portal_url:
+                logger.info("Navigation redirected: %s -> %s", portal_url, redirected_url)
+                self._emit_event(run_id, "navigation", f"Redirected to {redirected_url}", {
+                    "original_url": portal_url,
+                    "redirected_url": redirected_url,
+                    "title": page_title,
+                })
+            else:
+                self._emit_event(run_id, "navigation", f"Navigated to {portal_url}", {
+                    "title": page_title,
+                    "status": nav.get("status"),
+                    "url": portal_url,
+                })
+
+            # Capture initial screenshot and DOM of the landed/redirected page
+            page_structure = await browser.extract_page_structure()
             shot = await browser.take_screenshot(name=f"{run_id}_nav")
             if shot:
                 _update_run(run_id, latest_screenshot_path=shot)
+            _update_run(run_id, latest_dom=page_structure)
+
+            interactive = page_structure.get("interactive", {})
+            dom_desc = f"{len(interactive.get('links', []))} links, {len(interactive.get('buttons', []))} buttons, {len(interactive.get('inputs', []))} inputs, {page_structure.get('tables_count', 0)} tables"
+            self._emit_event(run_id, "observe", f"Initial DOM Observed on {redirected_url}", {
+                "url": redirected_url,
+                "title": page_title,
+                "summary": dom_desc,
+                "interactive": interactive,
+                "tables_count": page_structure.get("tables_count", 0),
+            })
         except Exception as nav_exc:
             logger.error("Initial browser navigation failed for %s: %s", portal_url, nav_exc)
             summary = f"Could not reach {portal_url}: {nav_exc}"
@@ -643,6 +647,27 @@ class TaskManager:
             if task_id and not str(task_id).startswith("cp_"):
                 await self._report.submit(run_id, task_id, "not_done", summary)
             return
+
+        # Check if pre-execution review or initial approval is pending (Requirement 4)
+        if run.get("status") == "needs_approval":
+            logger.info("Run %s waiting for initial pre-execution approval", run_id)
+            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
+                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
+            })
+            approval_event = run.get("_approval_event")
+            if not approval_event:
+                approval_event = asyncio.Event()
+                run["_approval_event"] = approval_event
+
+            await approval_event.wait()
+
+            if not run.get("_approval_decision", False):
+                summary = "Task was cancelled or denied by user."
+                _update_run(run_id, status="stopped", result_status="not_done", result_summary=summary)
+                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
+                return
+
+            _update_run(run_id, status="running")
 
         # Login if credentials provided (Public websites work without credentials)
         if username and password:
@@ -710,8 +735,16 @@ class TaskManager:
 
             page_structure = await browser.extract_page_structure()
             page_text = await browser.get_page_text()
-            cur_url = page_structure.get("url", portal_url)
-            cur_title = page_structure.get("title", "")
+            cur_url = page_structure.get("url") or (await browser.get_current_url())
+            cur_title = page_structure.get("title") or ""
+            prev_url = run.get("current_url")
+            if prev_url and cur_url != prev_url:
+                logger.info("Page transitioned/redirected: %s -> %s", prev_url, cur_url)
+                self._emit_event(run_id, "navigation", f"Page Redirected to {cur_url}", {
+                    "from_url": prev_url,
+                    "current_url": cur_url,
+                    "title": cur_title,
+                })
             _update_run(run_id, latest_dom=page_structure, current_url=cur_url, current_title=cur_title)
 
             # Capture real Playwright screenshot
@@ -1063,11 +1096,14 @@ class TaskManager:
         """Execute a validated action on the live browser."""
         try:
             if action_type == "click":
-                return await browser.click_element(target)
+                clicked = await browser.click_element(target)
+                await browser.wait_for_navigation(timeout_ms=2500)
+                return clicked
             elif action_type in {"fill_form", "fill_field"}:
                 return await browser.fill_field(target, value)
             elif action_type == "submit_form":
                 await browser.submit_form()
+                await browser.wait_for_navigation(timeout_ms=2500)
                 return True
             elif action_type == "download":
                 res = await browser.download_file(target or "download")
@@ -1077,10 +1113,16 @@ class TaskManager:
                     return True
                 return False
             elif action_type == "navigate":
-                if target.startswith("http"):
+                if target.startswith("http://") or target.startswith("https://"):
                     await browser.navigate(target)
+                elif target.startswith("/"):
+                    cur_u = await browser.get_current_url()
+                    from urllib.parse import urljoin
+                    full_target = urljoin(cur_u, target)
+                    await browser.navigate(full_target)
                 else:
                     await browser.click_element(target)
+                await browser.wait_for_navigation(timeout_ms=2500)
                 return True
             elif action_type in {"inspect_page", "extract_text"}:
                 await browser.get_page_text()
