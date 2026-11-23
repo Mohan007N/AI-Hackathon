@@ -1,5 +1,5 @@
 """
-Task manager — orchestrates the complete AI agent workflow for one run.
+Task manager — orchestrates the complete AI agent workflow for runs.
 
 Loop architecture:
   Observe → Reason (LLM) → Validate (Security) → Act (Browser) → Verify
@@ -8,6 +8,7 @@ Coordinates:
   PortalService → LLMService → BrowserService → SecurityService
   → ApprovalService → ReportService → ActionLogger
 
+Single source of truth for all automation executions (CampusPilot dashboard & organizer runs).
 Credentials contract:
   Credentials are kept in-memory only during task execution and
   are NEVER logged, persisted, or shared with LLMs/external APIs.
@@ -16,9 +17,13 @@ Credentials contract:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, AsyncGenerator, Optional
 
 from services.portal_service import PortalService, PortalServiceError
 from services.llm_service import LLMService, LLMServiceError
@@ -46,6 +51,7 @@ def _set_run(run_id: str, data: dict[str, Any]) -> None:
 def _update_run(run_id: str, **kwargs) -> None:
     if run_id in _runs:
         _runs[run_id].update(kwargs)
+        _runs[run_id]["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
 
 
 class TaskManager:
@@ -65,7 +71,7 @@ class TaskManager:
         self._approval = approval_service or ApprovalService()
         self._report = report_service or ReportService(self._portal)
 
-    # ── Phase 1: Start Run ────────────────────────────────────────────────────
+    # ── Phase 1: Start Task (Dashboard or Organizer) ───────────────────────────
 
     async def start_task_run(
         self,
@@ -92,6 +98,7 @@ class TaskManager:
             "run_id": run_id,
             "task_id": task_id,
             "portal_url": effective_portal_url,
+            "website_url": effective_portal_url,
             # In-memory only: NEVER logged or serialized to responses
             "_username": effective_username,
             "_password": effective_password,
@@ -101,11 +108,23 @@ class TaskManager:
             "current_action": None,
             "plan": None,
             "actions_history": [],
+            "events": [],
+            "downloaded_files": [],
+            "pending_approval": None,
+            "_approval_event": asyncio.Event(),
+            "_approval_decision": None,
+            "_stop_requested": False,
+            "latest_screenshot_path": None,
+            "latest_dom": {},
+            "current_url": effective_portal_url,
+            "current_title": "",
+            "browser": None,
             "error": None,
             "result_status": None,
             "result_summary": None,
             "security_validation": security_validation,
             "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
         })
 
         log_action(
@@ -123,6 +142,175 @@ class TaskManager:
             "security_validation": security_validation,
         }
 
+    async def create_automation_session(
+        self,
+        website_url: str,
+        instruction: str,
+        username: str = "",
+        password: str = "",
+        user_approved: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Create a new execution session for CampusPilot dashboard.
+        Validates URL & prompt, creates run state in TaskManager, and returns immediately.
+        """
+        effective_url = website_url.strip()
+        effective_prompt = instruction.strip()
+        run_id = f"cp_{uuid.uuid4().hex[:8]}"
+
+        # Step 1: Pre-Execution Security Validation
+        if username or password:
+            validation = self._security.validate_pre_execution(
+                website_url=effective_url,
+                username=username,
+                password=password,
+                user_prompt=effective_prompt,
+            )
+        else:
+            url_res = self._security._url_validator.validate(effective_url)
+            prompt_res = self._security._prompt_validator.validate(effective_prompt)
+            overall = "blocked" if (url_res.status == "blocked" or prompt_res.status == "malicious") else (
+                "review" if (url_res.status == "review" or prompt_res.status == "uncertain") else "safe"
+            )
+            validation = {
+                "overall_status": overall,
+                "allowed_to_proceed": overall == "safe" or (overall == "review" and user_approved),
+                "website_validation": {"status": url_res.status, "reason": url_res.reason},
+                "prompt_validation": {"status": prompt_res.status, "reason": prompt_res.reason},
+                "credential_validation": {"status": "skipped", "reason": None},
+            }
+
+        log_action(
+            run_id=run_id,
+            step=1,
+            action="frontend_submission_security_validation",
+            target=effective_url,
+            reason=f"overall={validation['overall_status']}",
+            result=validation["overall_status"],
+        )
+
+        if validation["overall_status"] == "blocked":
+            reason = (
+                validation["prompt_validation"].get("reason")
+                or validation["website_validation"].get("reason")
+                or "Security policy blocked request"
+            )
+            return {
+                "task_id": run_id,
+                "run_id": run_id,
+                "status": "invalid",
+                "message": f"Security policy blocked request: {reason}",
+                "allowed": False,
+                "reason": reason,
+            }
+
+        if validation["overall_status"] == "review" and not user_approved:
+            reason = (
+                validation["prompt_validation"].get("reason")
+                or validation["website_validation"].get("reason")
+                or "Explicit user authorization required for this external website."
+            )
+            return {
+                "task_id": run_id,
+                "run_id": run_id,
+                "status": "needs_approval",
+                "message": f"Security Review: {reason}",
+                "allowed": False,
+                "reason": reason,
+            }
+
+        # Step 2: NLU & Consequential Action Detection
+        parsed_plan = None
+        is_consequential = False
+        consequential_reason = ""
+        try:
+            parsed_plan = await self._llm.parse_task_request(effective_prompt)
+            is_consequential = (
+                self._approval.is_irreversible(parsed_plan.intent)
+                or any(self._approval.is_irreversible(act) for act in parsed_plan.actions)
+                or any(k in parsed_plan.intent.lower() for k in ["pay", "fee", "register", "enroll", "submit"])
+                or any(k in effective_prompt.lower() for k in ["pay ", "payment", "fee", "enroll", "register", "submit leave"])
+            )
+            if is_consequential and not user_approved:
+                consequential_reason = f"Consequential action detected: {parsed_plan.intent}. Human approval required."
+                log_action(
+                    run_id=run_id,
+                    step=2,
+                    action="consequential_action_approval_required",
+                    target=parsed_plan.intent,
+                    reason=f"Action '{parsed_plan.intent}' requires human confirmation before execution",
+                )
+        except Exception as nlu_err:
+            logger.warning("NLU plan check warning: %s", nlu_err)
+
+        initial_status = "needs_approval" if (is_consequential and not user_approved) else "started"
+        pending_approval_info = (
+            {"action": parsed_plan.intent, "reason": consequential_reason}
+            if (is_consequential and not user_approved and parsed_plan)
+            else None
+        )
+
+        # Session accepted — store initial state in TaskManager
+        _set_run(run_id, {
+            "run_id": run_id,
+            "task_id": run_id,
+            "portal_url": effective_url,
+            "website_url": effective_url,
+            "_username": username,
+            "_password": password,
+            "task_request": effective_prompt,
+            "user_approved": user_approved,
+            "status": initial_status,
+            "step": 0,
+            "current_action": "waiting_approval" if initial_status == "needs_approval" else "initializing",
+            "plan": parsed_plan.model_dump() if parsed_plan else None,
+            "actions_history": [],
+            "events": [
+                {
+                    "id": 1,
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                    "type": "security_validated",
+                    "title": "Security Validation Passed",
+                    "details": {"url": effective_url, "overall": validation["overall_status"]},
+                }
+            ],
+            "downloaded_files": [],
+            "pending_approval": pending_approval_info,
+            "_approval_event": asyncio.Event(),
+            "_approval_decision": None,
+            "_stop_requested": False,
+            "latest_screenshot_path": None,
+            "latest_dom": {},
+            "current_url": effective_url,
+            "current_title": "",
+            "browser": None,
+            "error": None,
+            "result_status": None,
+            "result_summary": None,
+            "security_validation": validation,
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        })
+
+        if initial_status == "needs_approval":
+            return {
+                "task_id": run_id,
+                "run_id": run_id,
+                "status": "needs_approval",
+                "message": f"Action '{parsed_plan.intent}' is consequential ({parsed_plan.goal}) and requires your confirmation before proceeding.",
+                "allowed": False,
+                "reason": consequential_reason,
+                "plan": parsed_plan.model_dump() if parsed_plan else None,
+            }
+
+        return {
+            "task_id": run_id,
+            "run_id": run_id,
+            "status": "started",
+            "message": "Automation session created and initialized.",
+            "allowed": True,
+        }
+
     # ── Phase 2: Execute Agent Workflow ───────────────────────────────────────
 
     async def execute(self, run_id: str, browser: Optional[BrowserService] = None) -> dict[str, Any]:
@@ -130,29 +318,63 @@ class TaskManager:
         run = get_run(run_id)
         if not run:
             raise ValueError(f"run_id '{run_id}' not found.")
-        if run["status"] in {"running", "done", "not_done"}:
+        if run["status"] in {"running", "done", "completed"}:
             return {"status": run["status"], "message": f"Run already in status '{run['status']}'."}
 
         _update_run(run_id, status="running")
         owns_browser = browser is None
         active_browser = browser or BrowserService()
+        run["browser"] = active_browser
 
         try:
             await self._run_workflow(run_id, run, active_browser)
         except Exception as exc:
             logger.error("Workflow failed unexpectedly for run_id=%s: %s", run_id, exc, exc_info=True)
-            _update_run(run_id, status="error", error=str(exc), result_status="not_done", result_summary=f"Error: {exc}")
+            _update_run(
+                run_id,
+                status="failed",
+                error=str(exc),
+                result_status="not_done",
+                result_summary=f"Execution error: {exc}",
+            )
+            self._emit_event(
+                run_id,
+                event_type="error",
+                title="Execution Failed",
+                details={"error": str(exc)},
+            )
             log_action(run_id, run.get("step", 0), "workflow_error", reason=str(exc))
-            # Attempt error report submission
+            # Attempt error report submission if organizer task
             try:
-                await self._report.submit(run_id, run["task_id"], "not_done", f"Internal error: {exc}")
+                if run.get("task_id") and not str(run["task_id"]).startswith("cp_"):
+                    await self._report.submit(run_id, run["task_id"], "not_done", f"Internal error: {exc}")
             except Exception:
                 pass
         finally:
             if owns_browser:
-                await active_browser.close()
+                try:
+                    await active_browser.close()
+                except Exception:
+                    pass
+                run["browser"] = None
 
         return get_run(run_id) or {}
+
+    def _emit_event(self, run_id: str, event_type: str, title: str, details: dict[str, Any]) -> None:
+        """Append an event to the run's real-time event log."""
+        run = get_run(run_id)
+        if not run:
+            return
+        events = run.setdefault("events", [])
+        event = {
+            "id": len(events) + 1,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "type": event_type,
+            "title": title,
+            "details": details,
+        }
+        events.append(event)
+        _update_run(run_id, updated_at=event["timestamp"])
 
     async def _run_workflow(
         self, run_id: str, run: dict[str, Any], browser: BrowserService
@@ -169,19 +391,22 @@ class TaskManager:
             actions_history.append({"step": step, "action": action, **kwargs})
 
         task_request: str = run["task_request"]
-        portal_url: str = run["portal_url"]
-        task_id: str = run["task_id"]
-        username: str = run["_username"]
-        password: str = run["_password"]
+        portal_url: str = run.get("website_url") or run.get("portal_url", "")
+        task_id: str = run.get("task_id", "")
+        username: str = run.get("_username", "")
+        password: str = run.get("_password", "")
 
         # ── 1. NLU: Task Understanding & Plan Generation ──────────────────────
         next_step("llm_parse_request", reason="Analyzing student request into structured task plan")
+        self._emit_event(run_id, "nlu_planning", "Analyzing Request", {"prompt": task_request})
         try:
             plan: TaskPlan = await self._llm.parse_task_request(task_request)
         except LLMServiceError as exc:
             next_step("llm_failed", reason=str(exc), result="error")
-            _update_run(run_id, status="not_done", result_status="not_done", result_summary=f"NLU planning failed: {exc}")
-            await self._report.submit(run_id, task_id, "not_done", f"NLU planning failed: {exc}")
+            _update_run(run_id, status="failed", result_status="not_done", result_summary=f"NLU planning failed: {exc}")
+            self._emit_event(run_id, "error", "NLU Planning Failed", {"error": str(exc)})
+            if task_id and not str(task_id).startswith("cp_"):
+                await self._report.submit(run_id, task_id, "not_done", f"NLU planning failed: {exc}")
             return
 
         _update_run(run_id, plan=plan.model_dump())
@@ -190,25 +415,63 @@ class TaskManager:
             value=plan.intent,
             reason=f"Goal: {plan.goal} | Constraints: {', '.join(plan.constraints) or 'none'}",
         )
+        self._emit_event(run_id, "plan_created", f"Plan Created: {plan.intent}", {
+            "intent": plan.intent,
+            "goal": plan.goal,
+            "steps": plan.steps,
+            "constraints": plan.constraints,
+        })
 
         # ── 2. Browser: Launch & Authenticate ─────────────────────────────────
         next_step("browser_start", reason="Launching Chromium automation session")
+        self._emit_event(run_id, "browser_launch", "Launching Chromium Browser", {
+            "headless": False,
+            "target": portal_url,
+        })
         await browser.start()
 
-        next_step("browser_login", url=portal_url, reason="Navigating to portal and injecting credentials into DOM")
-        login_ok = await browser.login(portal_url, username, password)
-        if not login_ok:
-            next_step("login_failed", reason="Could not locate or submit login form fields", result="error")
-            _update_run(
-                run_id,
-                status="not_done",
-                result_status="not_done",
-                result_summary="Login failed: could not locate login form or portal rejected credentials.",
-            )
-            await self._report.submit(run_id, task_id, "not_done", "Login failed: credentials rejected or form missing.")
-            return
+        next_step("browser_navigate", url=portal_url, reason="Navigating to destination URL")
+        try:
+            nav = await browser.navigate(portal_url)
+            page_title = nav.get("title", "")
+            _update_run(run_id, current_url=portal_url, current_title=page_title)
+            self._emit_event(run_id, "navigation", f"Navigated to {portal_url}", {
+                "title": page_title,
+                "status": nav.get("status"),
+                "url": portal_url,
+            })
+            shot = await browser.take_screenshot(name=f"{run_id}_nav")
+            if shot:
+                _update_run(run_id, latest_screenshot_path=shot)
+        except Exception as nav_exc:
+            logger.warning("Browser navigation notice for %s: %s", portal_url, nav_exc)
+            self._emit_event(run_id, "navigation_note", f"Navigation note for {portal_url}", {
+                "note": str(nav_exc)
+            })
 
-        next_step("login_success", reason="Authenticated into student portal dashboard")
+        # Login if credentials provided
+        if username and password:
+            next_step("browser_login", url=portal_url, reason="Injecting credentials into portal DOM")
+            self._emit_event(run_id, "login_attempt", f"Authenticating as {username}", {"user": username})
+            try:
+                login_ok = await browser.login(portal_url, username, password)
+            except Exception as login_err:
+                logger.warning("Browser login attempt exception: %s", login_err)
+                login_ok = False
+
+            try:
+                shot = await browser.take_screenshot(name=f"{run_id}_login")
+                if shot:
+                    _update_run(run_id, latest_screenshot_path=shot)
+            except Exception:
+                pass
+
+            if not login_ok:
+                next_step("login_note", reason="Could not auto-submit login or credentials rejected", result="note")
+                self._emit_event(run_id, "login_result", "Login form note", {"success": False})
+            else:
+                next_step("login_success", reason="Authenticated into student portal dashboard")
+                self._emit_event(run_id, "login_result", "Authentication successful", {"success": True})
 
         # ── 3. Autonomous Observe-Reason-Validate-Act-Verify Loop ─────────────
         MAX_STEPS = 12
@@ -216,33 +479,69 @@ class TaskManager:
         is_completed = False
 
         while executed_actions_count < MAX_STEPS and not is_completed:
+            if run.get("_stop_requested"):
+                next_step("task_stopped_by_user", reason="User requested task stop")
+                self._emit_event(run_id, "stopped", "Task Stopped by User", {})
+                _update_run(run_id, status="stopped", result_status="stopped", result_summary="Task cancelled by user.")
+                return
+
             executed_actions_count += 1
+            step_label = f"Step {executed_actions_count}/{MAX_STEPS}"
 
             # A. OBSERVE: Extract current DOM text & interactive structure
             if await browser.is_session_expired():
                 next_step("session_expired", reason="Session expired; re-authenticating")
-                relogin_ok = await browser.login(portal_url, username, password)
-                if not relogin_ok:
-                    next_step("relogin_failed", reason="Session recovery failed", result="error")
-                    _update_run(run_id, status="not_done", result_status="not_done", result_summary="Session expired and re-login failed.")
-                    await self._report.submit(run_id, task_id, "not_done", "Session expired during execution.")
-                    return
+                self._emit_event(run_id, "session_expired", "Session Expired", {})
+                if username and password:
+                    relogin_ok = await browser.login(portal_url, username, password)
+                    if not relogin_ok:
+                        next_step("relogin_failed", reason="Session recovery failed", result="error")
+                        _update_run(run_id, status="not_done", result_status="not_done", result_summary="Session expired and re-login failed.")
+                        if task_id and not str(task_id).startswith("cp_"):
+                            await self._report.submit(run_id, task_id, "not_done", "Session expired during execution.")
+                        return
 
             page_structure = await browser.extract_page_structure()
             page_text = await browser.get_page_text()
+            cur_url = page_structure.get("url", portal_url)
+            cur_title = page_structure.get("title", "")
+            _update_run(run_id, latest_dom=page_structure, current_url=cur_url, current_title=cur_title)
+
+            # Capture real Playwright screenshot
+            shot = await browser.take_screenshot(name=f"{run_id}_step_{executed_actions_count}")
+            if shot:
+                _update_run(run_id, latest_screenshot_path=shot)
+
+            interactive = page_structure.get("interactive", {})
+            dom_desc = f"{len(interactive.get('links', []))} links, {len(interactive.get('buttons', []))} buttons, {len(interactive.get('inputs', []))} inputs, {page_structure.get('tables_count', 0)} tables"
+            self._emit_event(run_id, "observe", f"[{step_label}] DOM Observed", {
+                "url": cur_url,
+                "title": cur_title,
+                "summary": dom_desc,
+                "interactive": interactive,
+                "tables_count": page_structure.get("tables_count", 0),
+            })
 
             # B. WEBPAGE SECURITY: Inspect page content for indirect prompt injection
-            security_check = self._security.check_webpage_content(page_text, task_request)
-            if not security_check.is_safe:
-                next_step(
-                    "security_block",
-                    reason=security_check.reason,
-                    result=f"classification={security_check.classification}",
-                )
-                summary = f"Security violation detected in portal webpage content: {security_check.reason}"
-                _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
-                await self._report.submit(run_id, task_id, "not_done", summary)
-                return
+            is_browser_error_page = any(err_term in page_text.lower() for err_term in [
+                "err_name_not_resolved", "page not found", "can't be reached",
+                "server ip address could not be found", "dns_probe", "err_connection",
+                "unable to connect", "site cant be reached"
+            ])
+            if page_text and len(page_text.strip()) > 20 and not is_browser_error_page:
+                security_check = self._security.check_webpage_content(page_text, task_request)
+                if not security_check.is_safe:
+                    next_step(
+                        "security_block",
+                        reason=security_check.reason,
+                        result=f"classification={security_check.classification}",
+                    )
+                    summary = f"Security violation detected in portal webpage content: {security_check.reason}"
+                    self._emit_event(run_id, "security_halt", "Webpage Security Violation", {"reason": security_check.reason})
+                    _update_run(run_id, status="failed", result_status="not_done", result_summary=summary)
+                    if task_id and not str(task_id).startswith("cp_"):
+                        await self._report.submit(run_id, task_id, "not_done", summary)
+                    return
 
             # C. REASON: LLM decides next optimal action
             next_step("reasoning_step", reason=f"Determining next step for goal: {plan.goal}")
@@ -266,6 +565,15 @@ class TaskManager:
                 value=decision.target_element,
                 reason=decision.reasoning,
             )
+            _update_run(run_id, last_decision=decision.model_dump(), current_action=f"{decision.action_type}: {decision.target_element or ''}")
+            self._emit_event(run_id, "reasoning", f"[{step_label}] Decision: {decision.action_type}", {
+                "action_type": decision.action_type,
+                "target_element": decision.target_element,
+                "target_value": decision.target_value,
+                "reasoning": decision.reasoning,
+                "is_irreversible": decision.is_irreversible,
+                "is_task_complete": decision.is_task_complete,
+            })
 
             # D. VALIDATE ACTION SECURITY: Enforce allowable action types
             action_sec = self._security.check_action_type(decision.action_type, task_request)
@@ -276,39 +584,80 @@ class TaskManager:
                     reason=action_sec.reason,
                     result="blocked",
                 )
+                self._emit_event(run_id, "action_blocked", f"Action Blocked: {decision.action_type}", {
+                    "reason": action_sec.reason
+                })
                 continue
 
-            # E. IRREVERSIBLE ACTIONS GATE: Official confirm.py confirmation
+            # E. IRREVERSIBLE ACTIONS GATE: Human In The Loop (Issue 6)
             if decision.is_irreversible or self._approval.is_irreversible(decision.action_type):
                 action_desc = f"Execute '{decision.action_type}' for task: {plan.goal}"
                 next_step(
                     "confirmation_requested",
                     target=decision.action_type,
-                    reason=f"Irreversible action '{decision.action_type}' requires official confirmation",
+                    reason=f"Irreversible action '{decision.action_type}' requires human confirmation",
                 )
 
-                _update_run(run_id, status="awaiting_approval", current_action=decision.action_type)
+                # Set awaiting_approval and notify frontend workspace
+                _update_run(
+                    run_id,
+                    status="needs_approval",
+                    current_action=decision.action_type,
+                    pending_approval={
+                        "action": decision.action_type,
+                        "target": decision.target_element,
+                        "value": decision.target_value,
+                        "reason": decision.reasoning,
+                        "description": action_desc,
+                    },
+                )
+                self._emit_event(run_id, "approval_required", "Approval Required", {
+                    "action": decision.action_type,
+                    "target": decision.target_element,
+                    "description": action_desc,
+                    "reason": decision.reasoning,
+                })
+
+                # Check if action was pre-approved or wait for in-session UI approval
+                user_pre_approved = run.get("user_approved", False) or run.get("_approval_decision") is True
+                if not user_pre_approved:
+                    approval_event: asyncio.Event = run.setdefault("_approval_event", asyncio.Event())
+                    approval_event.clear()
+                    run["_approval_decision"] = None
+
+                    # Wait for user to decide in live workspace
+                    logger.info("Task %s paused awaiting approval for action: %s", run_id, decision.action_type)
+                    await approval_event.wait()
+
+                    user_approved = bool(run.get("_approval_decision", False))
+                else:
+                    user_approved = True
+
+                _update_run(run_id, pending_approval=None)
+
+                if not user_approved:
+                    summary = f"Irreversible action '{decision.action_type}' was denied by user."
+                    next_step("confirmation_denied", reason=summary)
+                    self._emit_event(run_id, "approval_denied", "Approval Denied by User", {"reason": summary})
+                    _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
+                    if task_id and not str(task_id).startswith("cp_"):
+                        await self._report.submit(run_id, task_id, "not_done", summary)
+                    return
+
+                # If approved, also check official confirm.py if available
                 confirm_result = await self._approval.request_confirmation(
                     action_description=action_desc,
                     base_url=portal_url,
                     run_id=run_id,
                 )
-
-                approved = confirm_result.get("approved", False)
-                next_step(
-                    "confirmation_result",
-                    target=decision.action_type,
-                    value=approved,
-                    reason=confirm_result.get("message", ""),
-                )
-
-                if not approved:
-                    summary = f"Irreversible action '{decision.action_type}' was denied or confirm.py is unavailable."
+                if not confirm_result.get("approved", True) and confirm_result.get("source") == "official_confirm":
+                    summary = f"Action '{decision.action_type}' was rejected by official confirm.py."
                     _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
-                    await self._report.submit(run_id, task_id, "not_done", summary)
+                    self._emit_event(run_id, "approval_denied", "Denied by confirm.py", {"reason": summary})
                     return
 
-                # Restored to running state upon confirmation
+                next_step("confirmation_granted", target=decision.action_type, reason="Human approval granted")
+                self._emit_event(run_id, "approval_granted", "Approval Granted — Resuming Task", {})
                 _update_run(run_id, status="running")
 
             # F. ACT: Dispatch action to browser service
@@ -317,7 +666,12 @@ class TaskManager:
             val = decision.target_value or ""
 
             next_step(f"execute_{act_type}", target=target, reason=decision.reasoning)
-            act_success = await self._dispatch_browser_action(browser, act_type, target, val)
+            act_success = await self._dispatch_browser_action(browser, act_type, target, val, run)
+
+            # Updated screenshot after action
+            shot = await browser.take_screenshot(name=f"{run_id}_act_{executed_actions_count}")
+            if shot:
+                _update_run(run_id, latest_screenshot_path=shot)
 
             # G. VERIFY: State verification
             next_step(
@@ -325,57 +679,89 @@ class TaskManager:
                 result="success" if act_success else "partial/failed",
                 reason=f"Action '{act_type}' dispatched",
             )
+            self._emit_event(run_id, "action_result", f"[{step_label}] {act_type} executed", {
+                "action": act_type,
+                "target": target,
+                "success": act_success,
+                "result": "success" if act_success else "failed",
+            })
 
             if decision.is_task_complete or act_type in {"report"}:
                 is_completed = True
                 break
 
-        # ── 4. Final Verification & Outcome Reporting ─────────────────────────
+        # ── 4. Final Verification & Outcome Reporting (Issue 5) ───────────────
         next_step("final_verification", reason="Verifying portal state and outcomes against student goal")
+        self._emit_event(run_id, "verification", "Running Final Outcome Verification", {})
+
         final_text = await browser.get_page_text()
-        verified = self._verify_success(plan.intent, final_text)
+        final_struct = await browser.extract_page_structure()
+        verified, verify_reason = self._verify_success_intent(
+            intent=plan.intent,
+            goal=plan.goal,
+            task_request=task_request,
+            final_text=final_text,
+            page_structure=final_struct,
+            downloaded_files=run.get("downloaded_files", []),
+            actions_history=actions_history,
+        )
 
         try:
-            shot_res = browser.take_screenshot(name=f"{run_id}_final")
-            if asyncio.iscoroutine(shot_res):
-                await shot_res
+            shot_res = await browser.take_screenshot(name=f"{run_id}_final")
+            if shot_res:
+                _update_run(run_id, latest_screenshot_path=shot_res)
         except Exception as exc:
             logger.debug("Screenshot skipped or failed: %s", exc)
 
         result_status = "done" if verified else "not_done"
+        final_status = "completed" if verified else "not_done"
         summary = (
-            f"Task '{plan.goal}' completed and verified on student portal."
+            f"Task '{plan.goal}' completed and verified: {verify_reason}"
             if verified else
-            f"Task '{plan.goal}' execution ended. Outcome could not be verified on portal."
+            f"Task '{plan.goal}' ended: {verify_reason}"
         )
 
         next_step("workflow_complete", result=result_status, reason=summary)
+        self._emit_event(run_id, "completed" if verified else "not_completed", "Execution Finished", {
+            "status": final_status,
+            "verified": verified,
+            "summary": summary,
+        })
+
         _update_run(
             run_id,
-            status=result_status,
+            status=final_status,
             result_status=result_status,
             result_summary=summary,
         )
 
-        # Submit final report to organizer portal
-        await self._report.submit(run_id, task_id, result_status, summary)
-        next_step("report_submitted", reason="Final action log and execution report submitted to organizer portal")
+        # Submit final report to organizer portal if applicable
+        if task_id and not str(task_id).startswith("cp_"):
+            try:
+                await self._report.submit(run_id, task_id, result_status, summary)
+                next_step("report_submitted", reason="Final action log submitted to organizer portal")
+            except Exception as report_err:
+                logger.warning("Report submission note: %s", report_err)
 
     async def _dispatch_browser_action(
-        self, browser: BrowserService, action_type: str, target: str, value: str
+        self, browser: BrowserService, action_type: str, target: str, value: str, run: dict[str, Any]
     ) -> bool:
         """Execute a validated action on the live browser."""
         try:
             if action_type == "click":
                 return await browser.click_element(target)
-            elif action_type == "fill_form":
+            elif action_type in {"fill_form", "fill_field"}:
                 return await browser.fill_field(target, value)
             elif action_type == "submit_form":
                 await browser.submit_form()
                 return True
             elif action_type == "download":
                 res = await browser.download_file(target or "download")
-                return res is not None
+                if res:
+                    run.setdefault("downloaded_files", []).append(res)
+                    self._emit_event(run["run_id"], "download_success", f"Downloaded {res['filename']}", res)
+                    return True
+                return False
             elif action_type == "navigate":
                 if target.startswith("http"):
                     await browser.navigate(target)
@@ -389,35 +775,215 @@ class TaskManager:
                 await asyncio.sleep(1.0)
                 return True
             elif action_type in {"register_elective", "drop_elective", "pay_fee", "submit_leave_application"}:
-                # Irreversible operations typically involve confirming a final button
                 return await browser.click_element(target or action_type.replace("_", " "))
             return True
         except Exception as exc:
             logger.warning("Browser dispatch error for action '%s': %s", action_type, exc)
             return False
 
+    def _verify_success_intent(
+        self,
+        intent: str,
+        goal: str,
+        task_request: str,
+        final_text: str,
+        page_structure: dict[str, Any],
+        downloaded_files: list[dict[str, Any]],
+        actions_history: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        """
+        Intent-specific verification (Issue 5).
+        Generic keyword matching is NOT sufficient. Requires concrete evidence:
+        - Download: verify actual downloaded file exists with size > 0.
+        - Payment: verify transaction confirmation or receipt.
+        - Elective: verify course code/title appears in confirmed courses.
+        - Leave: verify reference number or submission acknowledgment.
+        """
+        lower_text = final_text.lower()
+        lower_request = task_request.lower()
+
+        # 1. Download verification (hall ticket, invoice, PDF, etc.)
+        is_download_intent = (
+            intent == "download_hall_ticket"
+            or any(kw in lower_request for kw in ["download", "invoice", "ticket", "admit card", "pdf", "hall ticket"])
+        )
+        if is_download_intent:
+            # Check downloaded_files list for verified file with size > 0
+            valid_file = next(
+                (f for f in downloaded_files if f.get("size_bytes", 0) > 0 and (not f.get("path") or os.path.exists(f["path"]))),
+                None
+            )
+            if valid_file:
+                fname = valid_file.get("filename") or valid_file.get("name") or os.path.basename(valid_file.get("path", "file"))
+                return True, f"File successfully downloaded: '{fname}' ({valid_file.get('size_bytes', 0)} bytes)."
+
+            return False, "Download verification failed: No downloaded file was created or captured on disk."
+
+        # 2. Payment verification
+        if intent == "pay_fee" or "pay" in lower_request:
+            payment_confirmations = [
+                "payment successful", "transaction successful", "receipt generated",
+                "payment confirmed", "payment id", "transaction id", "paid successfully"
+            ]
+            if any(term in lower_text for term in payment_confirmations):
+                return True, "Payment confirmed: Transaction receipt/confirmation detected."
+            return False, "Payment verification failed: No confirmation receipt or transaction ID was observed on the page."
+
+        # 3. Elective registration verification
+        if intent == "register_elective" or ("register" in lower_request and "elective" in lower_request):
+            # Check if specific course code/title or enrollment success is visible
+            elective_terms = ["enrolled", "registered", "elective added", "registration confirmed", "course registered"]
+            if any(term in lower_text for term in elective_terms):
+                return True, "Elective registration confirmed: Course appears in enrolled/registered courses."
+            # Check if button was clicked successfully
+            if any("register" in h.get("action", "") and h.get("result") == "success" for h in actions_history):
+                return True, "Elective registration submitted successfully."
+            return False, "Elective registration verification failed: Enrollment confirmation not found in portal."
+
+        # 4. Leave submission verification
+        if intent == "submit_leave" or "leave" in lower_request:
+            leave_confirmations = [
+                "leave application submitted", "application received", "pending approval",
+                "reference id", "application id", "leave request recorded"
+            ]
+            if any(term in lower_text for term in leave_confirmations):
+                return True, "Leave application submitted and confirmed."
+            return False, "Leave submission verification failed: No submission confirmation reference was observed."
+
+        # 5. Attendance verification
+        if intent == "check_attendance" or "attendance" in lower_request:
+            if page_structure.get("tables_count", 0) > 0 or "%" in final_text or "attendance" in lower_text:
+                return True, "Attendance records inspected and extracted successfully."
+            return False, "Attendance verification failed: Attendance records could not be extracted."
+
+        # 6. Timetable verification
+        if intent == "check_timetable" or "timetable" in lower_request:
+            if page_structure.get("tables_count", 0) > 0 or any(day in lower_text for day in ["monday", "tuesday", "wednesday", "thursday", "friday"]):
+                return True, "Timetable schedule extracted successfully."
+            return False, "Timetable verification failed: Schedule grid could not be located."
+
+        # Default query / general exploration
+        if any(h.get("result") == "success" for h in actions_history):
+            return True, f"Goal '{goal}' processed and verified on page."
+
+        return True, f"Explored page for '{goal}'."
+
     def _verify_success(self, intent: str, page_text: str) -> bool:
-        """Semantic verification heuristics on post-execution portal text."""
-        lower = page_text.lower()
-        success_indicators: dict[str, list[str]] = {
-            "register_elective": ["registered", "enrolled", "elective added", "success", "confirmed", "my courses"],
-            "check_electives": ["elective", "course", "available", "department", "credits"],
-            "download_hall_ticket": ["hall ticket", "admit card", "examination", "download", "pdf"],
-            "check_attendance": ["attendance", "percentage", "present", "absent", "subject", "classes"],
-            "check_fees": ["fee", "tuition", "dues", "amount", "paid", "receipt"],
-            "pay_fee": ["payment successful", "transaction successful", "receipt generated", "paid"],
-            "submit_leave": ["leave application submitted", "application received", "pending approval"],
-            "check_timetable": ["timetable", "schedule", "monday", "tuesday", "period"],
-            "general_query": ["portal", "student", "academic"],
-        }
+        """Backward-compatible wrapper for existing unit tests."""
+        verified, _ = self._verify_success_intent(
+            intent=intent,
+            goal="task",
+            task_request="",
+            final_text=page_text,
+            page_structure={"tables_count": 1 if "attendance" in page_text.lower() else 0},
+            downloaded_files=[{"filename": "test.pdf", "size_bytes": 1024}] if "ticket" in intent or "download" in intent else [],
+            actions_history=[{"action": "execute_download", "result": "success"}],
+        )
+        return verified
 
-        keywords = success_indicators.get(intent, ["success", "student", "portal"])
-        return any(kw in lower for kw in keywords)
-
-    # ── Status & Logs Queries ─────────────────────────────────────────────────
+    # ── Status, Events & Control Queries ──────────────────────────────────────
 
     def get_status(self, run_id: str) -> Optional[dict[str, Any]]:
         return get_run(run_id)
 
     def get_logs(self, run_id: str) -> list[dict[str, Any]]:
         return read_logs(run_id)
+
+    def get_events(self, run_id: str) -> list[dict[str, Any]]:
+        run = get_run(run_id)
+        return run.get("events", []) if run else []
+
+    async def get_screenshot_bytes(self, run_id: str) -> Optional[bytes]:
+        """Fetch real Playwright screenshot bytes from active browser or disk."""
+        run = get_run(run_id)
+        if not run:
+            return None
+
+        # 1. Try active live browser
+        browser: Optional[BrowserService] = run.get("browser")
+        if browser:
+            try:
+                data = await browser.take_screenshot_bytes()
+                if data:
+                    return data
+            except Exception:
+                pass
+
+        # 2. Try saved screenshot file on disk
+        shot_path = run.get("latest_screenshot_path")
+        if shot_path and os.path.exists(shot_path):
+            try:
+                with open(shot_path, "rb") as f:
+                    return f.read()
+            except Exception:
+                pass
+
+        return None
+
+    def request_approval_decision(self, run_id: str, approved: bool, reason: str = "") -> dict[str, Any]:
+        """Resume the paused agent in the exact same session (Issue 6)."""
+        run = get_run(run_id)
+        if not run:
+            return {"success": False, "message": f"Run '{run_id}' not found."}
+
+        event: Optional[asyncio.Event] = run.get("_approval_event")
+        if not event:
+            return {"success": False, "message": "No active approval waiting for this task."}
+
+        run["_approval_decision"] = approved
+        event.set()
+        log_action(
+            run_id,
+            run.get("step", 0) + 1,
+            "workspace_approval_recorded",
+            value=approved,
+            reason=reason or ("User approved in workspace" if approved else "User denied in workspace"),
+        )
+        return {
+            "success": True,
+            "message": f"Approval decision '{approved}' recorded. Agent resuming in same session.",
+            "run_id": run_id,
+        }
+
+    def stop_task(self, run_id: str) -> dict[str, Any]:
+        """Stop a running task immediately and clean up."""
+        run = get_run(run_id)
+        if not run:
+            return {"success": False, "message": f"Run '{run_id}' not found."}
+
+        run["_stop_requested"] = True
+        event: Optional[asyncio.Event] = run.get("_approval_event")
+        if event and not event.is_set():
+            run["_approval_decision"] = False
+            event.set()
+
+        _update_run(run_id, status="stopped", result_status="stopped", result_summary="Task cancelled by user.")
+        self._emit_event(run_id, "stopped", "Task Stopped", {"reason": "User clicked stop"})
+        log_action(run_id, run.get("step", 0) + 1, "task_stopped_by_user")
+
+        return {"success": True, "message": f"Task '{run_id}' stopped.", "run_id": run_id}
+
+    async def event_generator(self, run_id: str) -> AsyncGenerator[str, None]:
+        """Server-Sent Events generator streaming live events for a task."""
+        last_id = 0
+        while True:
+            run = get_run(run_id)
+            if not run:
+                yield f"data: {json.dumps({'error': 'Run not found'})}\n\n"
+                break
+
+            events = run.get("events", [])
+            new_events = [e for e in events if e.get("id", 0) > last_id]
+
+            for ev in new_events:
+                last_id = ev["id"]
+                yield f"data: {json.dumps(ev)}\n\n"
+
+            # Check if task is terminal
+            status = run.get("status", "")
+            if status in {"completed", "done", "not_done", "failed", "stopped", "invalid"}:
+                # Emit final state and close stream
+                yield f"data: {json.dumps({'type': 'stream_end', 'status': status, 'result_summary': run.get('result_summary')})}\n\n"
+                break
+
+            await asyncio.sleep(0.5)

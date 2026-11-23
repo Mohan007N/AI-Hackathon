@@ -41,7 +41,8 @@ class Settings:
     )
 
     # ── Browser ───────────────────────────────────────────────────────────────
-    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "true").lower() in (
+    # Local desktop execution defaults to visible Chromium (headless=False)
+    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in (
         "true", "1", "yes"
     )
     BROWSER_TIMEOUT_MS: int = int(os.getenv("BROWSER_TIMEOUT_MS", "30000"))

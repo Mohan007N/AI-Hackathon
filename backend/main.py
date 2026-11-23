@@ -27,6 +27,7 @@ from routes.approval_routes import router as approval_router
 from routes.report_routes import router as report_router
 from routes.security_routes import router as security_router
 from routes.automation_routes import router as automation_router
+from routes.test_portal_routes import router as test_portal_router
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -89,6 +90,7 @@ app.include_router(approval_router)
 app.include_router(report_router)
 app.include_router(security_router)
 app.include_router(automation_router)
+app.include_router(test_portal_router)
 
 # Direct root alias for standalone ML predictor
 from routes.security_routes import predict_prompt_security

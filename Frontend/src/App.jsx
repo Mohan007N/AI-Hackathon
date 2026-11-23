@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   Activity, AlertCircle, AlertOctagon, AlertTriangle, ArrowRight, ArrowUpRight,
-  Bot, Check, CheckCircle2, ChevronRight, Clock3, Eye, EyeOff, FileText,
-  Globe2, History, Info, LayoutDashboard, Link2, ListChecks, LoaderCircle, LockKeyhole,
-  LogOut, Menu, Plus, Search, Send, ShieldCheck, Sparkles, Trash2, User,
-  UserPlus, X, Zap
+  Bot, Check, CheckCircle2, ChevronRight, Clock3, Download, ExternalLink, Eye,
+  EyeOff, FileText, Globe2, History, Info, LayoutDashboard, Link2, ListChecks,
+  LoaderCircle, LockKeyhole, LogOut, Menu, Monitor, Play, Plus, RefreshCw,
+  Search, Send, ShieldAlert, ShieldCheck, Sparkles, Square, Terminal, Trash2,
+  User, UserPlus, X, Zap
 } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_AUTOMATION_API_URL || '').trim().replace(/\/$/, '')
@@ -14,6 +15,7 @@ const SESSION_KEY = 'campuspilot-demo-session-v2'
 const RECORDS_PREFIX = 'campuspilot-records-v2:'
 const LOGS_PREFIX = 'campuspilot-activity-v2:'
 const APPROVALS_PREFIX = 'campuspilot-approvals-v2:'
+const ACTIVE_TASK_KEY = 'campuspilot-active-task-v2'
 
 const BLOCKED_DOMAINS = [
   { domain: 'pornhub.com', category: 'adult-content' },
@@ -45,19 +47,46 @@ const examples = [
 
 const isoNow = () => new Date().toISOString()
 const makeId = () => `CP-${Date.now().toString().slice(-7)}`
-const formatDate = value => new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
-const hostOf = value => { try { return new URL(value).host } catch { return value || '—' } }
-const safeUrlForRecords = value => {
+const formatDate = value => {
   try {
-    const parsed = new URL(value)
+    return new Intl.DateTimeFormat('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+    }).format(new Date(value))
+  } catch { return String(value || '') }
+}
+
+const hostOf = value => {
+  try { return new URL(value).host } catch { return value || '—' }
+}
+
+const cleanUrl = value => {
+  try {
+    const parsed = new URL(String(value).trim())
     parsed.username = ''
     parsed.password = ''
-    for (const key of [...parsed.searchParams.keys()]) if (/(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key)) parsed.searchParams.delete(key)
+    return parsed.href
+  } catch { return value || '#' }
+}
+
+const safeUrlForRecords = value => {
+  try {
+    const parsed = new URL(String(value).trim())
+    parsed.username = ''
+    parsed.password = ''
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key)) {
+        parsed.searchParams.delete(key)
+      }
+    }
     parsed.hash = ''
     return parsed.href
   } catch { return value || '' }
 }
-const redactSecrets = (value, secrets = []) => secrets.filter(Boolean).reduce((text, secret) => text.split(String(secret)).join('[redacted]'), String(value ?? ''))
+
+const redactSecrets = (value, secrets = []) => {
+  return secrets.filter(Boolean).reduce((text, secret) => text.split(String(secret)).join('[redacted]'), String(value ?? ''))
+}
+
 const recordsKey = email => `${RECORDS_PREFIX}${email.toLowerCase()}`
 const logsKey = email => `${LOGS_PREFIX}${email.toLowerCase()}`
 const approvalsKey = email => `${APPROVALS_PREFIX}${email.toLowerCase()}`
@@ -103,21 +132,39 @@ function checkWebsiteSafety(rawUrl) {
 
 function classifyInstruction(instruction) {
   const text = instruction.toLowerCase()
-  const action = /\b(open|visit|navigate|browse|search|find|look up|check|read|extract|summari[sz]e|compare|download|upload|fill|complete|submit|send|post|pay|purchase|book|order|cancel|delete|remove|edit|update|change|register|sign in|log in|sign out|export|print|select|review|verify|retrieve|fetch|collect|save)\b/i.test(text)
-  if (!action || text.trim().length < 10) return { valid: false, sensitive: false, reason: 'I could not identify a clear action. Tell CampusPilot which website action you want, such as search, read, compare, download, or fill a form.' }
-  const sensitivePattern = /\b(submit|send|post|pay|payment|purchase|buy|book|order|cancel|delete|remove|edit|update|change|register|transfer|withdraw|confirm|finali[sz]e|upload|fill|place an order|make a payment)\b/i
+  const action = /\b(open|visit|navigate|browse|search|find|look up|check|read|extract|summari[sz]e|compare|download|upload|fill|complete|submit|send|post|pay|purchase|book|order|cancel|delete|remove|edit|update|change|register|sign in|log in|sign out|export|print|select|review|verify|retrieve|fetch|collect|save|enroll)\b/i.test(text)
+  if (!action || text.trim().length < 5) return { valid: false, sensitive: false, reason: 'I could not identify a clear action. Tell CampusPilot which website action you want, such as search, read, compare, download, or fill a form.' }
+  const sensitivePattern = /\b(submit|send|post|pay|payment|purchase|buy|book|order|cancel|delete|remove|edit|update|change|register|transfer|withdraw|confirm|finali[sz]e|place an order|make a payment)\b/i
   const sensitive = sensitivePattern.test(text)
   let category = 'Website navigation and information'
   if (/download|export|print/i.test(text)) category = 'Download or export'
   else if (/submit|upload|send|post|fill|complete/i.test(text)) category = 'Form or content submission'
   else if (/pay|payment|purchase|buy|book|order|transfer/i.test(text)) category = 'Financial or booking action'
-  else if (/delete|remove|edit|update|change|cancel|register/i.test(text)) category = 'Account or data modification'
+  else if (/delete|remove|edit|update|change|cancel|register|enroll/i.test(text)) category = 'Account or data modification'
   return { valid: true, sensitive, category }
 }
 
 function StatusPill({ status }) {
-  const kind = status === 'Completed' ? 'success' : status === 'Needs approval' ? 'warning' : ['Invalid request', 'Blocked by safety policy', 'Failed'].includes(status) ? 'danger' : status === 'Not executed' || status === 'Cancelled' ? 'neutral' : 'info'
-  return <span className={`status-pill ${kind}`}><i />{status}</span>
+  const normalized = String(status || '').toLowerCase()
+  let kind = 'info'
+  let label = status
+  if (['completed', 'done', 'success'].includes(normalized)) {
+    kind = 'success'
+    label = 'Completed'
+  } else if (['needs_approval', 'needs approval', 'waiting for approval'].includes(normalized)) {
+    kind = 'warning'
+    label = 'Needs approval'
+  } else if (['running', 'started', 'in_progress', 'in progress'].includes(normalized)) {
+    kind = 'info'
+    label = 'Running'
+  } else if (['failed', 'invalid request', 'blocked by safety policy', 'blocked'].includes(normalized)) {
+    kind = 'danger'
+    label = status || 'Failed'
+  } else if (['stopped', 'cancelled', 'not executed'].includes(normalized)) {
+    kind = 'neutral'
+    label = status || 'Stopped'
+  }
+  return <span className={`status-pill ${kind}`}><i />{label}</span>
 }
 
 function Field({ label, children, hint }) {
@@ -172,7 +219,7 @@ function AuthScreen({ onAuthenticated }) {
         <div className="auth-icon"><Bot size={22}/></div>
         <div className="eyebrow">YOUR WEB TASK ASSISTANT</div>
         <h1>{mode === 'login' ? 'Welcome back' : 'Create your account'}</h1>
-        <p className="auth-subtitle">{mode === 'login' ? 'Sign in to continue to your task workspace and saved records.' : 'Create a local demo account to keep your task records and activity in one place.'}</p>
+        <p className="auth-subtitle">{mode === 'login' ? 'Sign in to continue to your live agent workspace and saved records.' : 'Create a local demo account to keep your live agent workspace and records in one place.'}</p>
         <div className="auth-tabs"><button className={mode === 'login' ? 'active' : ''} onClick={() => changeMode('login')} type="button">Sign in</button><button className={mode === 'signup' ? 'active' : ''} onClick={() => changeMode('signup')} type="button">Sign up</button></div>
         <form onSubmit={submit} className="auth-form">
           {mode === 'signup' && <Field label="Full name"><input value={name} onChange={e => setName(e.target.value)} placeholder="Your name" autoComplete="name" required/></Field>}
@@ -180,32 +227,15 @@ function AuthScreen({ onAuthenticated }) {
           <Field label="Password" hint={mode === 'signup' ? 'At least 8 characters.' : undefined}><div className="auth-password"><input value={password} onChange={e => setPassword(e.target.value)} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required/><button type="button" onClick={() => setShowPassword(v => !v)} aria-label="Toggle password visibility">{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></Field>
           {mode === 'signup' && <Field label="Confirm password"><input value={confirm} onChange={e => setConfirm(e.target.value)} type="password" placeholder="Re-enter your password" autoComplete="new-password" required/></Field>}
           {error && <div className="alert alert-error"><AlertCircle size={16}/>{error}</div>}
-          {message && <div className="alert alert-info"><InfoIcon/>{message}</div>}
+          {message && <div className="alert alert-info"><Activity size={16}/>{message}</div>}
           <button className="button primary auth-submit" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" size={17}/> : mode === 'login' ? <LockKeyhole size={16}/> : <UserPlus size={16}/>} {mode === 'login' ? 'Sign in to CampusPilot' : 'Create account'} <ArrowRight size={16}/></button>
         </form>
         <div className="auth-footnote"><ShieldCheck size={15}/><span>Demo authentication is stored in this browser only. Production accounts require a secure backend.</span></div>
       </section>
-      <aside className="auth-aside"><div className="aside-orb"><Sparkles size={26}/></div><div className="eyebrow">ONE PROMPT. MANY SITES.</div><h2>Your web tasks,<br/>under one roof.</h2><p>Enter a website, describe the outcome you need, and let your connected browser agent handle the repetitive steps.</p><div className="auth-feature"><span><Globe2 size={17}/></span><div><strong>Work across websites</strong><small>Not limited to college portals.</small></div></div><div className="auth-feature"><span><ShieldCheck size={17}/></span><div><strong>Safety and approvals</strong><small>Restricted destinations are blocked. Sensitive actions require review.</small></div></div><div className="auth-feature"><span><History size={17}/></span><div><strong>Your records stay separate</strong><small>Task records and a dedicated approval queue have separate views.</small></div></div></aside>
+      <aside className="auth-aside"><div className="aside-orb"><Sparkles size={26}/></div><div className="eyebrow">ONE PROMPT. MANY SITES.</div><h2>Your web tasks,<br/>under one roof.</h2><p>Enter a website, describe the outcome you need, and let your connected browser agent handle the repetitive steps with live visual feedback.</p><div className="auth-feature"><span><Globe2 size={17}/></span><div><strong>Work across websites</strong><small>Runs in visible Playwright Chromium.</small></div></div><div className="auth-feature"><span><ShieldCheck size={17}/></span><div><strong>Safety and approvals</strong><small>Restricted destinations are blocked. Sensitive actions pause for in-session approval.</small></div></div><div className="auth-feature"><span><Monitor size={17}/></span><div><strong>Live visual workspace</strong><small>Watch actions, DOM structure, and browser screenshots in real time.</small></div></div></aside>
     </div>
-    <div className="auth-footer">© 2026 CampusPilot <span>·</span> Frontend prototype</div>
+    <div className="auth-footer">© 2026 CampusPilot <span>·</span> Live Agent Workspace</div>
   </main>
-}
-
-function InfoIcon() { return <Activity size={16}/> }
-
-function ApprovalModal({ request, onApprove, onCancel }) {
-  if (!request) return null
-  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onCancel() }}>
-    <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="approval-title">
-      <div className="dialog-icon warning"><AlertTriangle size={22}/></div>
-      <div className="eyebrow">HUMAN APPROVAL REQUIRED</div>
-      <h2 id="approval-title">Review before continuing</h2>
-      <p className="dialog-copy">This instruction may submit information, spend money, or change an account or website record.</p>
-      <div className="review-box"><div><span>WEBSITE</span><strong>{request.url}</strong></div><div><span>INSTRUCTION</span><strong>{request.prompt}</strong></div><div><span>WHY APPROVAL IS NEEDED</span><strong>{request.reason}</strong></div></div>
-      <div className="alert alert-warning"><ShieldCheck size={16}/> Approval does not guarantee success. The connected automation service must still enforce permissions and report the actual result.</div>
-      <div className="dialog-actions"><button className="button secondary" onClick={onCancel}>Cancel request</button><button className="button primary" onClick={onApprove}><Check size={16}/> Approve and continue</button></div>
-    </section>
-  </div>
 }
 
 function CredentialModal({ open, onClose, onSave }) {
@@ -218,21 +248,473 @@ function CredentialModal({ open, onClose, onSave }) {
   const save = event => { event.preventDefault(); onSave({ username: noLogin ? '' : username.trim(), password: noLogin ? '' : password, noLogin }); onClose() }
   return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
     <section className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="credentials-title">
-      <div className="dialog-icon"><LockKeyhole size={21}/></div><div className="eyebrow">OPTIONAL ONE-TIME SIGN-IN</div><h2 id="credentials-title">Website sign-in details</h2><p className="dialog-copy">These fields are only held temporarily for the current request. They are never included in saved task records or approval requests.</p>
+      <div className="dialog-icon"><LockKeyhole size={21}/></div><div className="eyebrow">OPTIONAL ONE-TIME SIGN-IN</div><h2 id="credentials-title">Website sign-in details</h2><p className="dialog-copy">These credentials are sent directly to the local backend session to log into the target portal. They are never saved in past records or browser localStorage.</p>
       <form onSubmit={save} className="dialog-form">
         <Field label="Username / email"><input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" disabled={noLogin} placeholder="Website username or email"/></Field>
         <Field label="Password"><div className="auth-password"><input value={password} onChange={e => setPassword(e.target.value)} type={showPassword ? 'text' : 'password'} autoComplete="current-password" disabled={noLogin} placeholder="Website password"/><button type="button" onClick={() => setShowPassword(v => !v)} aria-label="Toggle password visibility">{showPassword ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></Field>
         <label className="check-line"><input type="checkbox" checked={noLogin} onChange={e => setNoLogin(e.target.checked)}/><span>This website does not require a sign-in</span></label>
-        <div className="alert alert-info"><LockKeyhole size={15}/> In the frontend demo, credentials are not sent anywhere unless you configure an automation API.</div>
+        <div className="alert alert-info"><LockKeyhole size={15}/> Credentials are provided only for this immediate session.</div>
         <div className="dialog-actions"><button type="button" className="button secondary" onClick={onClose}>Cancel</button><button type="submit" className="button primary">Save for this request</button></div>
       </form>
     </section>
   </div>
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 4-PANE LIVE AGENT WORKSPACE (Issue 1, Issue 6, Issue 7)
+// ═════════════════════════════════════════════════════════════════════════════
+
+function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRecords }) {
+  const [screenshotTimestamp, setScreenshotTimestamp] = useState(Date.now())
+  const [screenshotError, setScreenshotError] = useState(false)
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false)
+  const [stopSubmitting, setStopSubmitting] = useState(false)
+  const eventsBottomRef = useRef(null)
+
+  // Auto-scroll event feed on new events
+  useEffect(() => {
+    if (eventsBottomRef.current) {
+      eventsBottomRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [task?.events?.length])
+
+  // Trigger screenshot reload when step or status updates
+  useEffect(() => {
+    setScreenshotTimestamp(Date.now())
+    setScreenshotError(false)
+  }, [task?.step, task?.current_action, task?.status, task?.updated_at])
+
+  const screenshotUrl = `${API_BASE}/api/automation/${task.id}/screenshot?t=${screenshotTimestamp}`
+  const isPendingApproval = task.status === 'needs_approval' || Boolean(task.pending_approval)
+  const isFinished = ['completed', 'failed', 'stopped', 'not_done'].includes(task.status)
+
+  const handleApprove = async () => {
+    setApprovalSubmitting(true)
+    try {
+      await onApprovalDecision(true)
+    } finally {
+      setApprovalSubmitting(false)
+    }
+  }
+
+  const handleReject = async () => {
+    setApprovalSubmitting(true)
+    try {
+      await onApprovalDecision(false)
+    } finally {
+      setApprovalSubmitting(false)
+    }
+  }
+
+  const handleStop = async () => {
+    setStopSubmitting(true)
+    try {
+      await onStop()
+    } finally {
+      setStopSubmitting(false)
+    }
+  }
+
+  const dom = task.latest_dom || {}
+  const interactive = dom.interactive || {}
+  const linksCount = interactive.links?.length ?? 0
+  const buttonsCount = interactive.buttons?.length ?? 0
+  const inputsCount = interactive.inputs?.length ?? 0
+  const tablesCount = dom.tables_count ?? 0
+
+  return (
+    <div className="workspace-shell">
+      {/* ── WORKSPACE TOP BAR ────────────────────────────────────────── */}
+      <div className="workspace-header">
+        <div className="workspace-title-box">
+          <div className="eyebrow"><span /> LIVE AGENT WORKSPACE</div>
+          <div className="workspace-headline">
+            <h2>{task.prompt || 'Autonomous Browser Task'}</h2>
+            <StatusPill status={task.status} />
+          </div>
+          <div className="workspace-meta">
+            <span className="ws-task-id">SESSION: <strong>{task.id}</strong></span>
+            <span className="ws-sep">·</span>
+            <span className="ws-target-link">
+              <Globe2 size={13} />
+              <a href={cleanUrl(task.url)} target="_blank" rel="noreferrer">
+                {task.url} <ArrowUpRight size={12} />
+              </a>
+            </span>
+            {task.current_title && (
+              <>
+                <span className="ws-sep">·</span>
+                <span className="ws-page-title" title={task.current_title}>
+                  Page: <strong>{task.current_title}</strong>
+                </span>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="workspace-actions">
+          {!isFinished && (
+            <button
+              className="button danger-ghost"
+              onClick={handleStop}
+              disabled={stopSubmitting}
+              title="Stop Playwright agent and clean up browser"
+            >
+              {stopSubmitting ? <LoaderCircle size={15} className="spin" /> : <Square size={14} />}
+              Stop Agent
+            </button>
+          )}
+          <button className="button secondary small" onClick={onViewRecords}>
+            <FileText size={14} /> Records
+          </button>
+          <button className="button primary small" onClick={onNewTask}>
+            <Plus size={14} /> New Task
+          </button>
+        </div>
+      </div>
+
+      {/* ── 3-COLUMN MAIN GRID ──────────────────────────────────────── */}
+      <div className="workspace-grid">
+        {/* ── LEFT PANE: Task & Status ──────────────────────────────── */}
+        <section className="ws-panel ws-left-pane">
+          <div className="ws-card">
+            <div className="ws-card-header">
+              <Terminal size={16} />
+              <h3>Task Instruction</h3>
+            </div>
+            <div className="ws-instruction-box">
+              <p>{task.prompt}</p>
+            </div>
+            <div className="ws-meta-row">
+              <span className="ws-label">TARGET URL</span>
+              <a href={cleanUrl(task.url)} target="_blank" rel="noreferrer" className="ws-url-val">
+                {task.url} <ExternalLink size={12} />
+              </a>
+            </div>
+            <div className="ws-meta-row">
+              <span className="ws-label">STATUS</span>
+              <StatusPill status={task.status} />
+            </div>
+            <div className="ws-meta-row">
+              <span className="ws-label">STEP PROGRESS</span>
+              <span className="ws-step-indicator">
+                Step <strong>{task.step || 1}</strong> of 10
+              </span>
+            </div>
+          </div>
+
+          <div className="ws-card">
+            <div className="ws-card-header">
+              <ShieldCheck size={16} />
+              <h3>Security & Verification</h3>
+            </div>
+            <div className="ws-sec-item">
+              <CheckCircle2 size={15} className="sec-ok" />
+              <div>
+                <strong>Destination Verified</strong>
+                <small>Destination cleared safety policies</small>
+              </div>
+            </div>
+            <div className="ws-sec-item">
+              <CheckCircle2 size={15} className="sec-ok" />
+              <div>
+                <strong>Strict URL / Prompt Separation</strong>
+                <small>Credentials & prompt kept out of URL</small>
+              </div>
+            </div>
+            <div className="ws-sec-item">
+              <CheckCircle2 size={15} className={task.verified ? 'sec-ok' : 'sec-neutral'} />
+              <div>
+                <strong>Intent-Specific Verification</strong>
+                <small>{task.verified ? 'Verified on real outcome' : 'Awaiting completion checks'}</small>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ── CENTER PANE: Live Playwright Browser ──────────────────── */}
+        <section className="ws-panel ws-center-pane">
+          <div className="browser-window">
+            <div className="browser-chrome-bar">
+              <div className="browser-dots">
+                <span className="dot red" />
+                <span className="dot yellow" />
+                <span className="dot green" />
+              </div>
+              <div className="browser-address-bar">
+                <LockKeyhole size={12} className="addr-lock" />
+                <span className="browser-current-url" title={task.current_url || task.url}>
+                  {task.current_url || task.url}
+                </span>
+                {!isFinished && <LoaderCircle size={13} className="spin addr-spinner" />}
+              </div>
+              <button
+                className="icon-button browser-reload-btn"
+                onClick={() => setScreenshotTimestamp(Date.now())}
+                title="Refresh Screenshot"
+              >
+                <RefreshCw size={14} />
+              </button>
+            </div>
+
+            <div className="browser-viewport">
+              <div className="browser-watermark">
+                <Monitor size={12} />
+                <span>LIVE PLAYWRIGHT CHROMIUM (READ-ONLY VIEW)</span>
+              </div>
+
+              {!screenshotError ? (
+                <img
+                  src={screenshotUrl}
+                  alt="Live Playwright Chromium View"
+                  className="browser-screenshot-img"
+                  onError={() => setScreenshotError(true)}
+                />
+              ) : (
+                <div className="browser-fallback">
+                  <Monitor size={42} />
+                  <strong>Playwright Chromium Window Active</strong>
+                  <p>Browser session is running on local desktop. Visible Chromium window is active.</p>
+                  <button
+                    className="button secondary small"
+                    onClick={() => { setScreenshotError(false); setScreenshotTimestamp(Date.now()) }}
+                  >
+                    <RefreshCw size={13} /> Try reloading frame
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="browser-footer">
+              <span>{task.current_title ? `Title: ${task.current_title}` : 'Page loaded in Playwright'}</span>
+              <span>Viewport: 1280 × 800</span>
+            </div>
+          </div>
+        </section>
+
+        {/* ── RIGHT PANE: DOM Observation & AI Reasoning ────────────── */}
+        <section className="ws-panel ws-right-pane">
+          {/* Human Approval Alert Card (Issue 6) */}
+          {isPendingApproval && (
+            <div className="ws-approval-alert-card">
+              <div className="ws-approval-head">
+                <AlertTriangle size={20} className="alert-icon" />
+                <div>
+                  <strong>Human Approval Required</strong>
+                  <small>Agent paused before irreversible action</small>
+                </div>
+              </div>
+              <div className="ws-approval-details">
+                <p>
+                  <strong>Proposed Action:</strong>{' '}
+                  {task.pending_approval?.action || 'Consequential operation on portal'}
+                </p>
+                <small>
+                  {task.pending_approval?.reason ||
+                    'This action may submit data, change account records, or perform a transaction.'}
+                </small>
+              </div>
+              <div className="ws-approval-actions">
+                <button
+                  className="button secondary small"
+                  onClick={handleReject}
+                  disabled={approvalSubmitting}
+                >
+                  <X size={14} /> Reject
+                </button>
+                <button
+                  className="button primary small"
+                  onClick={handleApprove}
+                  disabled={approvalSubmitting}
+                >
+                  {approvalSubmitting ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
+                  Approve and Resume
+                </button>
+              </div>
+              <p className="ws-approval-footnote">
+                Resumes the <em>same</em> browser session without reloading or losing state.
+              </p>
+            </div>
+          )}
+
+          {/* DOM Observation Summary */}
+          <div className="ws-card">
+            <div className="ws-card-header">
+              <Globe2 size={16} />
+              <h3>DOM Observation</h3>
+            </div>
+            <div className="dom-metrics-grid">
+              <div className="dom-metric">
+                <span className="dom-num">{linksCount}</span>
+                <span className="dom-label">Links</span>
+              </div>
+              <div className="dom-metric">
+                <span className="dom-num">{buttonsCount}</span>
+                <span className="dom-label">Buttons</span>
+              </div>
+              <div className="dom-metric">
+                <span className="dom-num">{inputsCount}</span>
+                <span className="dom-label">Inputs</span>
+              </div>
+              <div className="dom-metric">
+                <span className="dom-num">{tablesCount}</span>
+                <span className="dom-label">Tables</span>
+              </div>
+            </div>
+          </div>
+
+          {/* AI Reasoning & Action Proposal */}
+          <div className="ws-card">
+            <div className="ws-card-header">
+              <Bot size={16} />
+              <h3>AI Decision & Action</h3>
+            </div>
+            <div className="ai-decision-box">
+              <div className="ai-action-tag">
+                <Zap size={14} />
+                <span>{task.current_action || 'Observing DOM...'}</span>
+              </div>
+              {task.last_decision && (
+                <div className="ai-reason-text">
+                  <span className="ai-reason-label">REASONING:</span>
+                  <p>{task.last_decision.reasoning || 'Selecting optimal element based on user goal.'}</p>
+                  {task.last_decision.target_element && (
+                    <div className="ai-target-tag">
+                      TARGET: <code>{task.last_decision.target_element}</code>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {/* ── BOTTOM PANE: Action Events & Artifacts (Issue 7) ───────── */}
+      <div className="workspace-bottom-pane">
+        <div className="ws-events-section">
+          <div className="ws-card-header">
+            <Activity size={16} />
+            <h3>Execution Action Events & Playwright Log</h3>
+            <span className="events-count-badge">{(task.events || []).length} events</span>
+          </div>
+          <div className="ws-events-stream">
+            {(task.events || []).length === 0 ? (
+              <div className="ws-events-empty">
+                <LoaderCircle size={18} className="spin" />
+                <span>Waiting for agent action events...</span>
+              </div>
+            ) : (
+              (task.events || []).map((ev, idx) => (
+                <div key={idx} className={`ws-event-row ${ev.type || 'info'}`}>
+                  <span className="ws-event-time">
+                    {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : '—'}
+                  </span>
+                  <span className={`ws-event-tag ${ev.type || 'info'}`}>
+                    {ev.type?.toUpperCase() || 'INFO'}
+                  </span>
+                  <div className="ws-event-content">
+                    <strong>{ev.title || ev.message || 'Action executed'}</strong>
+                    {ev.details && typeof ev.details === 'object' && (
+                      <div className="ws-event-meta">
+                        {ev.details.url && <span>URL: {ev.details.url}</span>}
+                        {ev.details.summary && <span>{ev.details.summary}</span>}
+                        {ev.details.action_type && (
+                          <span>
+                            Action: <strong>{ev.details.action_type}</strong> (
+                            {ev.details.target_element || ''})
+                          </span>
+                        )}
+                        {ev.details.reason && <span>Reason: {ev.details.reason}</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={eventsBottomRef} />
+          </div>
+        </div>
+
+        <div className="ws-artifacts-section">
+          <div className="ws-card-header">
+            <Download size={16} />
+            <h3>Verification & Artifacts</h3>
+          </div>
+          <div className="ws-artifacts-body">
+            {/* Outcome Verification Card (Issue 5) */}
+            <div className={`ws-verify-card ${task.verified ? 'verified' : task.result_status === 'not_done' ? 'failed' : 'pending'}`}>
+              <div className="ws-verify-head">
+                {task.verified ? (
+                  <CheckCircle2 size={18} className="sec-ok" />
+                ) : task.result_status === 'not_done' ? (
+                  <AlertOctagon size={18} className="sec-danger" />
+                ) : (
+                  <Clock3 size={18} className="sec-warn" />
+                )}
+                <strong>
+                  {task.verified
+                    ? 'Intent Verified Complete'
+                    : task.result_status === 'not_done'
+                    ? 'Verification Not Satisfied'
+                    : 'Verification In Progress'}
+                </strong>
+              </div>
+              <p className="ws-verify-details">
+                {task.verification_details || task.result_summary || task.result || 'Agent is executing verification rules.'}
+              </p>
+            </div>
+
+            {/* Downloaded Files List */}
+            <div className="ws-downloads-box">
+              <span className="ws-section-subtitle">DOWNLOADED FILES & EVIDENCE</span>
+              {(task.downloaded_files || []).length === 0 ? (
+                <div className="ws-no-files">
+                  <small>No downloaded files in this session yet.</small>
+                </div>
+              ) : (
+                <div className="ws-files-list">
+                  {task.downloaded_files.map((file, fIdx) => {
+                    const fileName = typeof file === 'string' ? file.split(/[\\/]/).pop() : file.name || file.path || `artifact_${fIdx + 1}`
+                    const downloadUrl = `${API_BASE}/api/automation/${task.id}/download/${encodeURIComponent(fileName)}`
+                    return (
+                      <div key={fIdx} className="ws-file-item">
+                        <FileText size={16} className="file-icon" />
+                        <div className="file-info">
+                          <strong>{fileName}</strong>
+                          {file.size_bytes && <small>{Math.round(file.size_bytes / 1024)} KB</small>}
+                        </div>
+                        <a
+                          href={downloadUrl}
+                          className="button subtle small ws-dl-btn"
+                          download={fileName}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <Download size={13} /> Download
+                        </a>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MAIN APPLICATION COMPONENT
+// ═════════════════════════════════════════════════════════════════════════════
+
 function App() {
-  const [user, setUser] = useState(() => { try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null') } catch { return null } })
-  const [view, setView] = useState('console')
+  const [user, setUser] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null') } catch { return null }
+  })
+  const [view, setView] = useState('console') // 'console' | 'workspace' | 'records' | 'approvals'
   const [url, setUrl] = useState('')
   const [prompt, setPrompt] = useState('')
   const [credentials, setCredentials] = useState({ username: '', password: '', noLogin: false })
@@ -241,32 +723,150 @@ function App() {
   const [logs, setLogs] = useState([])
   const [approvals, setApprovals] = useState([])
   const [selectedId, setSelectedId] = useState(null)
-  const [approval, setApproval] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [search, setSearch] = useState('')
   const [mobileMenu, setMobileMenu] = useState(false)
 
+  // Active Live Agent Workspace Task State
+  const [activeTask, setActiveTask] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(ACTIVE_TASK_KEY) || 'null') } catch { return null }
+  })
+
+  // Sync session & local storage
   useEffect(() => {
     if (user) {
       sessionStorage.setItem(SESSION_KEY, JSON.stringify(user))
-      const savedRecords = readArray(recordsKey(user.email))
-      setRecords(savedRecords)
+      setRecords(readArray(recordsKey(user.email)))
       setLogs(readArray(logsKey(user.email)))
       setApprovals(readArray(approvalsKey(user.email)))
-      setSelectedId(null)
-      setView('console')
     } else {
       sessionStorage.removeItem(SESSION_KEY)
-      setRecords([]); setLogs([]); setApprovals([]); setSelectedId(null)
+      setRecords([])
+      setLogs([])
+      setApprovals([])
+      setSelectedId(null)
     }
   }, [user?.email])
 
+  // Sync active task to session storage
+  useEffect(() => {
+    if (activeTask) {
+      sessionStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify(activeTask))
+    } else {
+      sessionStorage.removeItem(ACTIVE_TASK_KEY)
+    }
+  }, [activeTask])
+
+  // ── LIVE POLLING & SSE STREAM FOR ACTIVE TASK ──────────────────────────────
+  useEffect(() => {
+    if (!activeTask?.id || !API_BASE) return
+
+    const taskId = activeTask.id
+    const isFinished = ['completed', 'failed', 'stopped', 'not_done'].includes(activeTask.status)
+
+    // Fallback & continuous polling for robust status sync
+    let timer = null
+    const pollStatus = async () => {
+      try {
+        const resp = await axios.get(`${API_BASE}/api/automation/${taskId}/status`)
+        const data = resp.data
+        if (data) {
+          setActiveTask(prev => {
+            if (!prev || prev.id !== taskId) return prev
+            return {
+              ...prev,
+              status: data.status,
+              step: data.step,
+              current_url: data.current_url || prev.current_url,
+              current_title: data.current_title || prev.current_title,
+              current_action: data.current_action || prev.current_action,
+              result_status: data.result_status,
+              result_summary: data.result_summary,
+              latest_dom: data.latest_dom || prev.latest_dom,
+              pending_approval: data.pending_approval,
+              downloaded_files: data.downloaded_files || prev.downloaded_files,
+              events: data.events?.length ? data.events : prev.events,
+              verified: data.verified,
+              verification_details: data.verification_details,
+              last_decision: data.last_decision || prev.last_decision,
+              updated_at: data.updated_at || isoNow(),
+            }
+          })
+
+          // If finished, sync final record to past records
+          if (['completed', 'failed', 'stopped', 'not_done'].includes(data.status)) {
+            const finalStatus = data.status === 'completed' ? 'Completed' : data.status === 'stopped' ? 'Stopped' : 'Failed'
+            persistRecords(current => current.map(item =>
+              item.id === taskId
+                ? { ...item, status: finalStatus, result: data.result_summary || data.status, verified: data.verified }
+                : item
+            ))
+          }
+        }
+      } catch (err) {
+        // quiet poll errors
+      }
+    }
+
+    if (!isFinished) {
+      timer = setInterval(pollStatus, 1500)
+    }
+
+    // Set up SSE EventSource for real-time action events
+    let eventSource = null
+    try {
+      eventSource = new EventSource(`${API_BASE}/api/automation/${taskId}/events`)
+      eventSource.onmessage = e => {
+        try {
+          const payload = JSON.parse(e.data)
+          if (payload) {
+            setActiveTask(prev => {
+              if (!prev || prev.id !== taskId) return prev
+              const existingEvents = prev.events || []
+              const updatedEvents = [...existingEvents, payload]
+              return {
+                ...prev,
+                events: updatedEvents,
+                updated_at: isoNow(),
+              }
+            })
+          }
+        } catch {
+          // parse error
+        }
+      }
+      eventSource.onerror = () => {
+        // Close on error; polling will handle it
+        eventSource?.close()
+      }
+    } catch {
+      // EventSource failed or unsupported
+    }
+
+    return () => {
+      if (timer) clearInterval(timer)
+      if (eventSource) eventSource.close()
+    }
+  }, [activeTask?.id, activeTask?.status])
+
   const addLog = (event, details = {}) => {
     if (!user) return
-    const item = { id: `LOG-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`, at: isoNow(), event, website: safeUrlForRecords(details.website || ''), prompt: redactSecrets(details.prompt || '', details.secrets || [credentials.username, credentials.password]), detail: redactSecrets(details.detail || '', details.secrets || [credentials.username, credentials.password]), requestId: details.requestId || '' }
-    setLogs(current => { const next = [item, ...current].slice(0, 300); saveArray(logsKey(user.email), next); return next })
+    const item = {
+      id: `LOG-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      at: isoNow(),
+      event,
+      website: safeUrlForRecords(details.website || ''),
+      prompt: redactSecrets(details.prompt || '', details.secrets || [credentials.username, credentials.password]),
+      detail: redactSecrets(details.detail || '', details.secrets || [credentials.username, credentials.password]),
+      requestId: details.requestId || ''
+    }
+    setLogs(current => {
+      const next = [item, ...current].slice(0, 300)
+      saveArray(logsKey(user.email), next)
+      return next
+    })
   }
 
   const persistRecords = updater => {
@@ -285,221 +885,715 @@ function App() {
     })
   }
 
-  const selectedRecord = useMemo(() => records.find(record => record.id === selectedId) || null, [records, selectedId])
-  const filteredRecords = useMemo(() => records.filter(record => `${record.url} ${record.prompt} ${record.status}`.toLowerCase().includes(search.toLowerCase())), [records, search])
-  const filteredLogs = useMemo(() => logs.filter(log => `${log.event} ${log.website} ${log.prompt} ${log.detail} ${log.requestId}`.toLowerCase().includes(search.toLowerCase())), [logs, search])
+  const selectedRecord = useMemo(() => records.find(r => r.id === selectedId) || null, [records, selectedId])
+  const filteredRecords = useMemo(() => records.filter(r => `${r.url} ${r.prompt} ${r.status}`.toLowerCase().includes(search.toLowerCase())), [records, search])
 
   const authenticate = nextUser => {
-    setUser(nextUser); sessionStorage.setItem(SESSION_KEY, JSON.stringify(nextUser))
+    setUser(nextUser)
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(nextUser))
   }
 
   const logout = () => {
     addLog('Signed out', { detail: 'The user ended the current CampusPilot session.' })
-    setUser(null); setCredentials({ username: '', password: '', noLogin: false }); setView('console')
+    setUser(null)
+    setActiveTask(null)
+    setCredentials({ username: '', password: '', noLogin: false })
+    setView('console')
   }
 
   const validate = () => {
-    setError(''); setNotice('')
+    setError('')
+    setNotice('')
     const safety = checkWebsiteSafety(url)
     if (!safety.safe) { setError(safety.reason); return { ok: false, safety } }
-    if (prompt.trim().length < 10) { setError('Describe what you want CampusPilot to do in at least 10 characters.'); return { ok: false } }
+    if (prompt.trim().length < 5) { setError('Describe what you want CampusPilot to do in at least 5 characters.'); return { ok: false } }
     return { ok: true, safety }
   }
 
-  const createRecord = (status, classification, safety, result, approved = false, steps = []) => ({
-    id: makeId(), url: safeUrlForRecords(safety?.normalizedUrl || url.trim()), prompt: redactSecrets(prompt.trim(), [credentials.username, credentials.password]), status,
-    createdAt: isoNow(), category: classification?.category || 'Safety review', result,
-    approved, steps, host: safety?.host || hostOf(url)
-  })
-
-  const submitTask = async approved => {
+  // ── START TASK WORKSPACE (Issue 1, Issue 2, Issue 8) ───────────────────────
+  const startAgentTask = async (approved = false) => {
     const checked = validate()
     if (!checked.ok) {
       if (checked.safety && !checked.safety.safe) {
-        const blocked = createRecord('Blocked by safety policy', null, null, checked.safety.reason, false, ['Website URL checked', 'Destination matched a restricted category', 'Automation stopped before execution'])
-        persistRecords(current => [blocked, ...current].slice(0, 200)); setSelectedId(blocked.id)
+        const blocked = {
+          id: makeId(),
+          url: safeUrlForRecords(checked.safety.normalizedUrl || url.trim()),
+          prompt: redactSecrets(prompt.trim(), [credentials.username, credentials.password]),
+          status: 'Blocked by safety policy',
+          createdAt: isoNow(),
+          category: 'Safety policy',
+          result: checked.safety.reason,
+          approved: false,
+          steps: ['Destination checked against restricted categories', 'Automation stopped before browser launch'],
+          host: checked.safety.host || hostOf(url)
+        }
+        persistRecords(c => [blocked, ...c].slice(0, 200))
+        setSelectedId(blocked.id)
         addLog('Website blocked by safety rules', { website: url, prompt, detail: checked.safety.reason, requestId: blocked.id })
-        setError(''); setNotice('This destination is blocked. No login details were used and no browser action was started.')
+        setError('')
+        setNotice('This destination is blocked. No login details were used and no browser action was started.')
         setCredentials({ username: '', password: '', noLogin: false })
       }
       return
     }
+
     const classification = classifyInstruction(prompt)
     if (!classification.valid) {
-      const invalid = createRecord('Invalid request', classification, checked.safety, classification.reason, false, ['Website URL validated', 'Instruction could not be mapped to a clear action'])
-      persistRecords(current => [invalid, ...current].slice(0, 200)); setSelectedId(invalid.id)
+      const invalid = {
+        id: makeId(),
+        url: safeUrlForRecords(checked.safety.normalizedUrl),
+        prompt: redactSecrets(prompt.trim(), [credentials.username, credentials.password]),
+        status: 'Invalid request',
+        createdAt: isoNow(),
+        category: classification.category,
+        result: classification.reason,
+        approved: false,
+        steps: ['Website URL validated', 'Instruction could not be mapped to a clear action'],
+        host: checked.safety.host
+      }
+      persistRecords(c => [invalid, ...c].slice(0, 200))
+      setSelectedId(invalid.id)
       addLog('Invalid instruction rejected', { website: url, prompt, detail: classification.reason, requestId: invalid.id })
-      setNotice('Request rejected before any browser interaction.'); setCredentials({ username: '', password: '', noLogin: false }); return
-    }
-    if (classification.sensitive && !approved) {
-      const pending = createRecord('Needs approval', classification, checked.safety, 'Waiting for a human decision. No browser action has been started.', false, ['Website URL validated', 'Instruction classified as consequential', 'Waiting for human approval'])
-      persistRecords(current => [pending, ...current].slice(0, 200))
-      persistApprovals(current => [{ ...pending, reason: 'This instruction may submit information, change an account, make a payment, purchase, book, upload, or delete content.' }, ...current].slice(0, 100))
-      setSelectedId(pending.id)
-      addLog('Approval requested', { website: url, prompt, detail: 'Sensitive action saved to the Approval Queue. No browser action has been started.', requestId: pending.id })
+      setNotice('Request rejected before any browser interaction.')
       setCredentials({ username: '', password: '', noLogin: false })
-      setPrompt('')
-      setNotice('This task is waiting in Approvals. Review it there before any execution can be requested.')
-      setView('approvals')
       return
     }
-    const record = createRecord('Not executed', classification, checked.safety, '', approved, ['Website URL validated', 'Instruction classified', ...(classification.sensitive ? ['User approval recorded'] : []), 'Checking automation runtime'])
-    persistRecords(current => [record, ...current].slice(0, 200)); setSelectedId(record.id)
-    addLog(approved ? 'Sensitive action approved' : 'Task submitted', { website: url, prompt, detail: approved ? 'User approved the requested action. Runtime execution is still subject to backend checks.' : 'Task validated and submitted to the configured automation service, if available.', requestId: record.id })
-    setBusy(true); setError(''); setNotice('')
-    const oneTimeCredentials = { username: credentials.noLogin ? '' : credentials.username.trim(), password: credentials.noLogin ? '' : credentials.password }
+
+    // STRICT URL / PROMPT SEPARATION (Issue 8)
+    const normalizedTargetUrl = checked.safety.normalizedUrl
+    const naturalInstruction = prompt.trim()
+    const oneTimeCredentials = {
+      username: credentials.noLogin ? '' : credentials.username.trim(),
+      password: credentials.noLogin ? '' : credentials.password
+    }
     setCredentials({ username: '', password: '', noLogin: false })
     setPrompt('')
-
-    if (API_BASE && !/^https:\/\//i.test(API_BASE) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?($|\/)/i.test(API_BASE)) {
-      const message = 'The configured automation endpoint must use HTTPS. The request was not sent because the connection may expose sign-in details.'
-      persistRecords(current => current.map(item => item.id === record.id ? { ...item, status: 'Failed', result: message, steps: [...record.steps, 'Insecure runtime endpoint rejected'] } : item))
-      addLog('Insecure runtime endpoint rejected', { website: record.url, prompt: record.prompt, detail: message, requestId: record.id })
-      setBusy(false); setNotice('Request not sent. Configure an HTTPS automation endpoint.'); return
-    }
+    setBusy(true)
+    setError('')
+    setNotice('')
 
     if (!API_BASE) {
-      const message = 'The website and instruction passed the local checks, but no browser automation runtime is connected. Nothing was opened or changed. Configure VITE_AUTOMATION_API_URL and a trusted backend to execute this request.'
-      persistRecords(current => current.map(item => item.id === record.id ? { ...item, status: 'Not executed', result: message, steps: [...record.steps, 'Runtime unavailable — safely stopped'] } : item))
-      addLog('Execution unavailable', { website: record.url, prompt: record.prompt, detail: 'No automation API endpoint is configured. No browser action was performed.', requestId: record.id })
-      setBusy(false); setNotice('Request saved. Live browser automation is not connected.'); return
+      setError('Automation runtime is offline. Set VITE_AUTOMATION_API_URL in .env to connect the backend.')
+      setBusy(false)
+      return
     }
+
     try {
-      const payload = { portalUrl: checked.safety.normalizedUrl, url: checked.safety.normalizedUrl, ...oneTimeCredentials, instruction: record.prompt, prompt: record.prompt, userApproved: approved, source: 'campuspilot-dashboard' }
-      const response = await axios.post(`${API_BASE}/api/automation/execute`, payload, { timeout: 120000, headers: { 'Content-Type': 'application/json' } })
-      const data = response.data || {}
-      const status = data.status === 'completed' ? 'Completed' : data.status === 'needs_approval' ? 'Needs approval' : data.status === 'invalid' ? 'Invalid request' : data.status === 'failed' ? 'Failed' : 'Not executed'
-      const secrets = [oneTimeCredentials.username, oneTimeCredentials.password]
-      const result = redactSecrets(data.message || data.summary || 'The automation service returned a response without a summary.', secrets)
-      const steps = Array.isArray(data.steps) ? data.steps.map(step => redactSecrets(step, secrets)) : [...record.steps, 'Automation service responded']
-      persistRecords(current => current.map(item => item.id === record.id ? { ...item, status, result, steps, runtimeTaskId: data.taskId || data.task_id || null } : item))
-      if (data.status === 'needs_approval') {
-        persistApprovals(current => [{ ...record, id: record.id, status: 'Needs approval', reason: result }, ...current.filter(a => a.id !== record.id)].slice(0, 100))
-        setNotice(result)
-        setView('approvals')
+      // POST /api/automation/start (Issue 2)
+      const payload = {
+        url: normalizedTargetUrl,
+        instruction: naturalInstruction,
+        username: oneTimeCredentials.username,
+        password: oneTimeCredentials.password,
+        userApproved: approved,
       }
-      addLog(`Runtime result: ${status}`, { website: record.url, prompt: record.prompt, detail: result, requestId: record.id, secrets: [oneTimeCredentials.username, oneTimeCredentials.password] })
-    } catch (runtimeError) {
-      const detail = redactSecrets(runtimeError.response?.data?.message || runtimeError.message || 'Unknown connection error', [oneTimeCredentials.username, oneTimeCredentials.password])
-      const result = `Could not reach the automation service: ${detail}. No success is assumed.`
-      persistRecords(current => current.map(item => item.id === record.id ? { ...item, status: 'Failed', result, steps: [...record.steps, 'Backend request failed'] } : item))
-      addLog('Automation runtime failed', { website: record.url, prompt: record.prompt, detail, requestId: record.id, secrets: [oneTimeCredentials.username, oneTimeCredentials.password] })
-    } finally { setBusy(false) }
-  }
 
-  const onSubmit = event => {
-    event.preventDefault()
-    if (!busy) submitTask(false)
-  }
-  const decideApproval = async (item, decision) => {
-    const nextStatus = decision === 'approved' ? 'Approved — not executed' : 'Rejected'
-    persistApprovals(current => current.filter(entry => entry.id !== item.id))
-    persistRecords(current => current.map(record => record.id === item.id ? {
-      ...record,
-      status: nextStatus,
-      approved: decision === 'approved',
-      result: decision === 'approved'
-        ? 'Human approval recorded. Execution still requires a connected automation runtime and a separate backend authorization check.'
-        : 'The request was rejected by the user. No browser action was performed.',
-      steps: [...(record.steps || []), decision === 'approved' ? 'Human approval granted' : 'Human approval rejected']
-    } : record))
-    addLog(decision === 'approved' ? 'Human approval granted' : 'Human approval rejected', {
-      website: item.url, prompt: item.prompt,
-      detail: decision === 'approved'
-        ? 'Approval recorded. No browser action is claimed; runtime execution remains separate.'
-        : 'Request rejected. No browser action was performed.',
-      requestId: item.id
-    })
-    if (decision === 'approved' && API_BASE) {
-      try {
-        const response = await axios.post(`${API_BASE}/api/automation/execute`, {
-          url: item.url, portalUrl: item.url, instruction: item.prompt, prompt: item.prompt,
-          userApproved: true, approvalRecordId: item.id, source: 'campuspilot-dashboard'
-        }, { timeout: 120000, headers: { 'Content-Type': 'application/json' } })
-        const data = response.data || {}
-        const status = data.status === 'completed' ? 'Completed' : data.status === 'needs_approval' ? 'Needs approval' : data.status === 'invalid' ? 'Invalid request' : data.status === 'failed' ? 'Failed' : 'Not executed'
-        persistRecords(current => current.map(record => record.id === item.id ? { ...record, status, result: data.message || data.summary || 'Automation service responded.', steps: [...(record.steps || []), ...(Array.isArray(data.steps) ? data.steps : ['Automation service responded'])] } : record))
-        addLog(`Runtime result: ${status}`, { website: item.url, prompt: item.prompt, detail: data.message || data.summary || '', requestId: item.id })
-      } catch (err) {
-        const detail = err.response?.data?.message || err.message || 'Unknown runtime error'
-        persistRecords(current => current.map(record => record.id === item.id ? { ...record, status: 'Failed', result: `Approval was recorded, but the runtime request failed: ${detail}` } : record))
-        addLog('Approved task runtime failed', { website: item.url, prompt: item.prompt, detail, requestId: item.id })
+      const response = await axios.post(`${API_BASE}/api/automation/start`, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 20000,
+      })
+
+      const data = response.data || {}
+      const taskId = data.task_id || makeId()
+
+      const initialTask = {
+        id: taskId,
+        url: normalizedTargetUrl,
+        prompt: naturalInstruction,
+        status: data.status || 'started',
+        step: 1,
+        current_url: normalizedTargetUrl,
+        current_title: 'Connecting to Chromium browser...',
+        current_action: 'Initializing Playwright session...',
+        result_status: null,
+        result_summary: null,
+        latest_dom: { interactive: { links: [], buttons: [], inputs: [] }, tables_count: 0 },
+        pending_approval: data.status === 'needs_approval' ? { action: data.reason || 'Consequential action' } : null,
+        downloaded_files: [],
+        events: [
+          {
+            timestamp: isoNow(),
+            type: 'info',
+            title: 'Agent Session Initialized',
+            details: { url: normalizedTargetUrl, summary: 'Launching Playwright Chromium engine' }
+          }
+        ],
+        verified: false,
+        verification_details: '',
+        createdAt: isoNow(),
+        updated_at: isoNow(),
       }
+
+      // NAVIGATE IMMEDIATELY TO LIVE AGENT WORKSPACE (Issue 1)
+      setActiveTask(initialTask)
+      setView('workspace')
+
+      // Record in past records
+      const record = {
+        id: taskId,
+        url: safeUrlForRecords(normalizedTargetUrl),
+        prompt: naturalInstruction,
+        status: data.status === 'needs_approval' ? 'Needs approval' : 'In progress',
+        createdAt: isoNow(),
+        category: classification.category,
+        result: data.message || 'Execution started in live workspace',
+        approved,
+        steps: ['Task initialized in live Agent Workspace'],
+        host: hostOf(normalizedTargetUrl),
+      }
+      persistRecords(c => [record, ...c].slice(0, 200))
+      addLog('Agent workspace started', { website: normalizedTargetUrl, prompt: naturalInstruction, requestId: taskId })
+
+    } catch (err) {
+      const detail = err.response?.data?.detail || err.response?.data?.message || err.message || 'Failed to start task.'
+      setError(`Could not start agent session: ${detail}`)
+    } finally {
+      setBusy(false)
     }
   }
-  const approve = () => { setApproval(null); submitTask(true) }
-  const cancelApproval = () => { setApproval(null); setCredentials({ username: '', password: '', noLogin: false }); addLog('Approval declined', { website: url, prompt, detail: 'User cancelled the sensitive request.' }); setNotice('Request cancelled. No action was performed.') }
-  const removeRecord = id => { persistRecords(current => current.filter(item => item.id !== id)); if (selectedId === id) setSelectedId(null); addLog('Task record deleted', { detail: `Record ${id} was removed from task records.` }) }
-  const clearRecords = () => { persistRecords([]); setSelectedId(null); addLog('Task records cleared', { detail: 'All saved task records were cleared.' }) }
-  const clearLogs = () => { saveArray(logsKey(user.email), []); setLogs([]) }
 
-  if (!user) return <AuthScreen onAuthenticated={authenticate}/> 
+  // ── IN-SESSION HUMAN APPROVAL (Issue 6) ────────────────────────────────────
+  const handleApprovalDecision = async (decision) => {
+    if (!activeTask?.id || !API_BASE) return
+    const taskId = activeTask.id
 
-  return <div className="app-shell">
-    <aside className={`sidebar ${mobileMenu ? 'open' : ''}`}>
-      <div className="brand-row"><div className="brand-mark"><Link2 size={18}/></div><div className="brand-copy"><strong>CampusPilot</strong><span>Web task assistant</span></div><button className="icon-button mobile-close" onClick={() => setMobileMenu(false)} aria-label="Close menu"><X size={18}/></button></div>
-      <div className="side-label">WORKSPACE</div>
-      <button className={`nav-item ${view === 'console' ? 'active' : ''}`} onClick={() => { setView('console'); setMobileMenu(false); setSearch('') }}><LayoutDashboard size={17}/><span>Task console</span></button>
-      <button className={`nav-item ${view === 'records' ? 'active' : ''}`} onClick={() => { setView('records'); setMobileMenu(false); setSearch('') }}><FileText size={17}/><span>Past records</span><b>{records.length}</b></button>
-      <button className={`nav-item ${view === 'approvals' ? 'active' : ''}`} onClick={() => { setView('approvals'); setMobileMenu(false); setSearch('') }}><ShieldCheck size={17}/><span>Approvals</span><b>{approvals.length}</b></button>
-      <div className="sidebar-bottom"><div className="runtime-mini"><div className="runtime-mini-head"><Bot size={16}/><span>AGENT STATUS</span><i className={API_BASE ? 'online' : ''}/></div><strong>{API_BASE ? 'Runtime configured' : 'Runtime offline'}</strong><p>{API_BASE ? 'A backend endpoint is configured.' : 'Frontend mode · no live browser control.'}</p></div><div className="account-mini"><div className="user-avatar">{user.name.slice(0, 1).toUpperCase()}</div><div className="account-copy"><strong>{user.name}</strong><span>{user.email}</span></div><button className="icon-button logout-small" onClick={logout} title="Sign out"><LogOut size={16}/></button></div></div>
-    </aside>
-    {mobileMenu && <button className="mobile-scrim" onClick={() => setMobileMenu(false)} aria-label="Close navigation"/>}
+    try {
+      const response = await axios.post(`${API_BASE}/api/automation/${taskId}/approval`, {
+        approved: decision,
+        reason: decision ? 'Approved via live agent workspace' : 'Rejected via live agent workspace',
+      })
 
-    <main className="main-area">
-      <header className="topbar"><div className="topbar-leading"><button className="icon-button mobile-menu" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={19}/></button><div className="crumb">Workspace <ChevronRight size={14}/> <strong>{view === 'console' ? 'Task console' : view === 'records' ? 'Past records' : 'Approvals'}</strong></div></div><div className="topbar-trailing"><span className={`runtime-badge ${API_BASE ? 'connected' : ''}`}><i/>{API_BASE ? 'Runtime configured' : 'Demo mode · runtime offline'}</span><div className="top-user"><div className="user-avatar small">{user.name.slice(0, 1).toUpperCase()}</div><span>{user.name}</span><button className="icon-button" onClick={logout} aria-label="Sign out" title="Sign out"><LogOut size={16}/></button></div></div></header>
+      const data = response.data || {}
+      setActiveTask(prev => ({
+        ...prev,
+        status: decision ? 'running' : 'stopped',
+        pending_approval: null,
+        events: [
+          ...(prev?.events || []),
+          {
+            timestamp: isoNow(),
+            type: 'approval',
+            title: decision ? 'Human Approval Granted' : 'Human Approval Rejected',
+            details: { reason: data.message || (decision ? 'Resuming Playwright session' : 'Session stopped') }
+          }
+        ]
+      }))
+      addLog(decision ? 'Action approved in session' : 'Action rejected in session', {
+        website: activeTask.url,
+        prompt: activeTask.prompt,
+        requestId: taskId
+      })
+    } catch (err) {
+      const detail = err.response?.data?.detail || err.message
+      setError(`Failed to submit approval: ${detail}`)
+    }
+  }
 
-      <div className="page-content">
-        {view === 'console' && <>
-          <section className="page-heading"><div><div className="eyebrow"><span/> ONE DASHBOARD. MANY WEBSITES.</div><h1>What would you like me to do?</h1><p>Enter any website and describe the task. CampusPilot checks the destination and requests approval for consequential actions.</p></div><div className="trust-chip"><ShieldCheck size={16}/> You stay in control</div></section>
-          <div className="console-grid">
-            <section className="panel task-panel">
-              <div className="panel-head"><div className="panel-icon"><Globe2 size={19}/></div><div><h2>Create a browser task</h2><p>Website and natural-language instruction</p></div><span className="step-tag">NEW REQUEST</span></div>
-              <form onSubmit={onSubmit}>
-                <div className="panel-body">
-                  <Field label="Website link" hint="Use the official website address (HTTP and HTTPS supported)."><div className="input-with-icon"><Link2 size={17}/><input type="url" value={url} onChange={event => { setUrl(event.target.value); setError('') }} placeholder="http://172.16.37.58:8000/..." required/></div></Field>
-                  <div className="prompt-topline"><span className="field-label">What should CampusPilot do?</span><span className="optional-label">NATURAL LANGUAGE</span></div>
-                  <div className="prompt-box"><textarea value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={1600} rows={5} placeholder="Example: Open the website, find the latest invoice, download it as a PDF, and tell me where it was saved." required/><div className="prompt-bottom"><span><Sparkles size={14}/> Clear instructions work best</span><span>{prompt.length}/1600</span></div></div>
-                  <div className="credential-inline"><div className="credential-inline-icon"><LockKeyhole size={16}/></div><div><strong>Website sign-in details</strong><small>{credentials.noLogin ? 'No sign-in required for this request' : credentials.username || credentials.password ? 'Details added for this request · hidden from records' : 'Optional · only needed for sites that require login'}</small></div><button type="button" className="button subtle" onClick={() => setCredentialModal(true)}>{credentials.noLogin || credentials.username || credentials.password ? 'Edit details' : 'Add details'}</button></div>
-                  <div className="example-section"><div className="example-title">TRY AN EXAMPLE <span>Select to fill the prompt</span></div><div className="example-list">{examples.map((example, index) => <button type="button" key={index} onClick={() => { setPrompt(example); setError('') }}>{example}<ArrowUpRight size={14}/></button>)}</div></div>
-                  {error && <div className="alert alert-error"><AlertCircle size={16}/>{error}</div>}
-                  {notice && <div className="alert alert-info"><CheckCircle2 size={16}/>{notice}</div>}
-                  <div className="submit-bar"><div className="submit-note"><ShieldCheck size={16}/><span>Restricted sites are blocked. Sensitive actions pause for approval.</span></div><button type="submit" className="button primary" disabled={busy}>{busy ? <><LoaderCircle size={16} className="spin"/> Processing</> : <>Review task <ArrowRight size={16}/></>}</button></div>
-                </div>
-              </form>
-            </section>
-            <aside className="side-panels">
-              <section className="panel runtime-panel"><div className="runtime-panel-head"><div className="panel-icon purple"><Bot size={18}/></div><div><h3>Automation runtime</h3><p>Browser execution service</p></div></div><div className={`runtime-state ${API_BASE ? 'ready' : 'offline'}`}><i/>{API_BASE ? 'API endpoint configured' : 'Not connected'}</div><p>{API_BASE ? `Requests are handed to ${API_BASE}.` : 'This is a frontend-only build. It can validate and save tasks, but it cannot control a real browser until a trusted Playwright or Selenium backend is connected.'}</p>{API_BASE ? <div className="runtime-hint ready"><CheckCircle2 size={15}/><span>Live backend connected at <code>{API_BASE}</code>. Automation engine ready.</span></div> : <div className="runtime-hint"><AlertCircle size={15}/><span>Set <code>VITE_AUTOMATION_API_URL</code> in <code>.env</code> when the backend is ready.</span></div>}</section>
-              <section className="panel safety-panel"><div className="side-title"><ShieldCheck size={17}/><div><strong>Safety checks</strong><small>Before any browser action</small></div></div><div className="safety-item"><CheckCircle2 size={16}/><span>Validate the website URL</span></div><div className="safety-item"><CheckCircle2 size={16}/><span>Block restricted destination categories</span></div><div className="safety-item"><CheckCircle2 size={16}/><span>Require approval for sensitive actions</span></div><div className="safety-item"><CheckCircle2 size={16}/><span>Keep credentials out of saved records</span></div><p className="safety-disclaimer">The built-in restricted-domain list is limited and cannot detect every malicious or deceptive site. A production backend should also use a maintained threat-intelligence service.</p></section>
-            </aside>
+  // ── STOP ACTIVE TASK ──────────────────────────────────────────────────────
+  const handleStopTask = async () => {
+    if (!activeTask?.id || !API_BASE) return
+    const taskId = activeTask.id
+    try {
+      await axios.post(`${API_BASE}/api/automation/${taskId}/stop`)
+      setActiveTask(prev => ({
+        ...prev,
+        status: 'stopped',
+        events: [
+          ...(prev?.events || []),
+          {
+            timestamp: isoNow(),
+            type: 'warning',
+            title: 'Agent Stopped by User',
+            details: { summary: 'Playwright browser closed and session cleaned up.' }
+          }
+        ]
+      }))
+      persistRecords(current => current.map(item =>
+        item.id === taskId ? { ...item, status: 'Stopped', result: 'Stopped by user in workspace' } : item
+      ))
+      addLog('Agent stopped', { website: activeTask.url, prompt: activeTask.prompt, requestId: taskId })
+    } catch (err) {
+      // quiet
+    }
+  }
+
+  const removeRecord = id => {
+    persistRecords(current => current.filter(item => item.id !== id))
+    if (selectedId === id) setSelectedId(null)
+    addLog('Task record deleted', { detail: `Record ${id} was removed from task records.` })
+  }
+  const clearRecords = () => {
+    persistRecords([])
+    setSelectedId(null)
+    addLog('Task records cleared', { detail: 'All saved task records were cleared.' })
+  }
+
+  if (!user) return <AuthScreen onAuthenticated={authenticate} />
+
+  const isTaskRunning = activeTask && ['started', 'running', 'in_progress', 'needs_approval'].includes(activeTask.status)
+
+  return (
+    <div className="app-shell">
+      {/* ── SIDEBAR NAVIGATION ────────────────────────────────────────── */}
+      <aside className={`sidebar ${mobileMenu ? 'open' : ''}`}>
+        <div className="brand-row">
+          <div className="brand-mark"><Link2 size={18} /></div>
+          <div className="brand-copy">
+            <strong>CampusPilot</strong>
+            <span>Autonomous Web Agent</span>
           </div>
-          <section className="how-panel"><div className="how-heading"><div><div className="eyebrow"><span/> SIMPLE WORKFLOW</div><h2>From instruction to result</h2></div><span className="how-caption">No college-specific pages. Just the website you choose.</span></div><div className="workflow"><div><span className="workflow-icon"><Globe2 size={18}/></span><strong>01 · Website</strong><small>Choose the destination</small></div><div className="workflow-line"/><div><span className="workflow-icon"><MessageSymbol/></span><strong>02 · Instruction</strong><small>Describe the outcome</small></div><div className="workflow-line"/><div><span className="workflow-icon"><ShieldCheck size={18}/></span><strong>03 · Approval</strong><small>Review sensitive steps</small></div><div className="workflow-line"/><div><span className="workflow-icon"><Zap size={18}/></span><strong>04 · Execution</strong><small>Connected runtime acts</small></div></div></section>
-        </>}
+          <button className="icon-button mobile-close" onClick={() => setMobileMenu(false)} aria-label="Close menu">
+            <X size={18} />
+          </button>
+        </div>
 
-        {view === 'records' && <>
-          <section className="page-heading compact"><div><div className="eyebrow"><span/> YOUR SAVED TASKS</div><h1>Past records</h1><p>Each record shows only the website link and the instruction. Sign-in details are never displayed here.</p></div><button className="button primary" onClick={() => setView('console')}><Plus size={16}/> New task</button></section>
-          <section className="panel list-panel"><div className="list-toolbar"><div><h2>Task records</h2><p>{records.length} saved request{records.length === 1 ? '' : 's'}</p></div><div className="toolbar-actions"><div className="search-box"><Search size={16}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search website or prompt"/></div><button className="button secondary small" onClick={clearRecords} disabled={!records.length}><Trash2 size={14}/> Clear records</button></div></div>
-            {filteredRecords.length === 0 ? <div className="empty-state"><div><FileText size={23}/></div><strong>{records.length ? 'No matching records' : 'No past records yet'}</strong><p>Your submitted website tasks will appear here, without any login credentials.</p></div> : <div className="record-table"><div className="record-table-head"><span>WEBSITE LINK</span><span>PROMPT / INSTRUCTION</span><span>CREATED</span><span>STATUS</span><span/></div>{filteredRecords.map(record => <button key={record.id} className={`record-row ${selectedId === record.id ? 'selected' : ''}`} onClick={() => setSelectedId(selectedId === record.id ? null : record.id)}><span className="record-website"><Globe2 size={15}/><strong>{record.url}</strong></span><span className="record-prompt">{record.prompt}</span><span className="record-date">{formatDate(record.createdAt)}</span><span><StatusPill status={record.status}/></span><ChevronRight size={16}/></button>)}</div>}
-            {selectedRecord && <div className="record-expanded"><div className="expanded-heading"><div><span>REQUEST {selectedRecord.id}</span><h3>Task details</h3></div><StatusPill status={selectedRecord.status}/></div><div className="expanded-field"><label>WEBSITE LINK</label><a href={selectedRecord.url} target="_blank" rel="noreferrer">{selectedRecord.url} <ArrowUpRight size={13}/></a></div><div className="expanded-field"><label>PROMPT / INSTRUCTION</label><p>{selectedRecord.prompt}</p></div><div className="expanded-meta"><span>Created: {formatDate(selectedRecord.createdAt)}</span><span>Approval: {selectedRecord.approved ? 'Granted' : 'Not granted / not required'}</span></div>{selectedRecord.result && <div className="record-result"><Info size={15}/><span>{selectedRecord.result}</span></div>}{selectedRecord.steps?.length > 0 && <div className="record-steps">{selectedRecord.steps.map((step, index) => <div key={index}><span>{index + 1}</span>{step}</div>)}</div>}<button className="button danger-ghost" onClick={() => removeRecord(selectedRecord.id)}><Trash2 size={14}/> Delete this record</button></div>}
-          </section>
-        </>}
+        <div className="side-label">WORKSPACE</div>
+        <button
+          className={`nav-item ${view === 'console' ? 'active' : ''}`}
+          onClick={() => { setView('console'); setMobileMenu(false) }}
+        >
+          <LayoutDashboard size={17} />
+          <span>Task console</span>
+        </button>
 
-        {view === 'approvals' && <>
-          <section className="page-heading compact"><div><div className="eyebrow"><span/> HUMAN-IN-THE-LOOP CONTROL</div><h1>Approval queue</h1><p>Review consequential tasks before they can be handed to an automation runtime. Approving records consent; it does not bypass backend safety checks.</p></div><span className="trust-chip"><ShieldCheck size={16}/> {approvals.length} awaiting review</span></section>
-          <section className="panel list-panel"><div className="list-toolbar"><div><h2>Tasks requiring your decision</h2><p>Website and instruction only — no website credentials are shown.</p></div><div className="search-box"><Search size={16}/><input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search approvals"/></div></div>
-            {approvals.filter(item => `${item.url} ${item.prompt}`.toLowerCase().includes(search.toLowerCase())).length === 0
-              ? <div className="empty-state"><div><ShieldCheck size={23}/></div><strong>{approvals.length ? 'No matching approvals' : 'Nothing waiting for approval'}</strong><p>Tasks involving payments, purchases, submissions, uploads, bookings or account changes will appear here for your review.</p></div>
-              : <div className="approval-queue">{approvals.filter(item => `${item.url} ${item.prompt}`.toLowerCase().includes(search.toLowerCase())).map(item => <article className="approval-card" key={item.id}><div className="approval-card-top"><span className="approval-mark"><ShieldCheck size={18}/></span><div className="approval-card-main"><strong>{hostOf(item.url)}</strong><small>{formatDate(item.createdAt)} · {item.id}</small></div><StatusPill status="Needs approval"/></div><div className="approval-detail"><label>WEBSITE LINK</label><a href={item.url} target="_blank" rel="noreferrer">{item.url} <ArrowUpRight size={13}/></a></div><div className="approval-detail"><label>REQUESTED INSTRUCTION</label><p>{item.prompt}</p></div><div className="approval-reason"><AlertTriangle size={16}/><span>{item.reason}</span></div><div className="approval-actions"><button className="button secondary" onClick={() => decideApproval(item, 'rejected')}><X size={15}/> Reject request</button><button className="button primary" onClick={() => decideApproval(item, 'approved')}><Check size={15}/> Approve request</button></div></article>)}</div>}
-          </section>
-        </>}
-        <footer className="app-footer"><span>© 2026 CampusPilot</span><span><span className="footer-status"/> Frontend prototype</span><span>Credentials never appear in past records or approval requests</span></footer>
-      </div>
-    </main>
-    <ApprovalModal request={approval} onApprove={approve} onCancel={cancelApproval}/>
-    <CredentialModal open={credentialModal} onClose={() => setCredentialModal(false)} onSave={setCredentials}/>
-  </div>
+        {activeTask && (
+          <button
+            className={`nav-item ${view === 'workspace' ? 'active' : ''}`}
+            onClick={() => { setView('workspace'); setMobileMenu(false) }}
+          >
+            <Monitor size={17} />
+            <span>Agent workspace</span>
+            {isTaskRunning ? <span className="live-dot-pulse" title="Live task running" /> : <b>Active</b>}
+          </button>
+        )}
+
+        <button
+          className={`nav-item ${view === 'records' ? 'active' : ''}`}
+          onClick={() => { setView('records'); setMobileMenu(false) }}
+        >
+          <FileText size={17} />
+          <span>Past records</span>
+          <b>{records.length}</b>
+        </button>
+
+        <button
+          className={`nav-item ${view === 'approvals' ? 'active' : ''}`}
+          onClick={() => { setView('approvals'); setMobileMenu(false) }}
+        >
+          <ShieldCheck size={17} />
+          <span>Approvals</span>
+          <b>{approvals.length}</b>
+        </button>
+
+        <div className="sidebar-bottom">
+          <div className="runtime-mini">
+            <div className="runtime-mini-head">
+              <Bot size={16} />
+              <span>RUNTIME</span>
+              <i className={API_BASE ? 'online' : ''} />
+            </div>
+            <strong>{API_BASE ? 'Playwright Connected' : 'Runtime Offline'}</strong>
+            <p>{API_BASE ? 'Local Chromium execution active' : 'Connect VITE_AUTOMATION_API_URL'}</p>
+          </div>
+          <div className="account-mini">
+            <div className="user-avatar">{user.name.slice(0, 1).toUpperCase()}</div>
+            <div className="account-copy">
+              <strong>{user.name}</strong>
+              <span>{user.email}</span>
+            </div>
+            <button className="icon-button logout-small" onClick={logout} title="Sign out">
+              <LogOut size={16} />
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {mobileMenu && <button className="mobile-scrim" onClick={() => setMobileMenu(false)} aria-label="Close navigation" />}
+
+      {/* ── MAIN AREA ─────────────────────────────────────────────────── */}
+      <main className="main-area">
+        <header className="topbar">
+          <div className="topbar-leading">
+            <button className="icon-button mobile-menu" onClick={() => setMobileMenu(true)} aria-label="Open navigation">
+              <Menu size={19} />
+            </button>
+            <div className="crumb">
+              CampusPilot <ChevronRight size={14} />{' '}
+              <strong>
+                {view === 'console'
+                  ? 'Task console'
+                  : view === 'workspace'
+                  ? 'Agent workspace'
+                  : view === 'records'
+                  ? 'Past records'
+                  : 'Approvals'}
+              </strong>
+            </div>
+          </div>
+          <div className="topbar-trailing">
+            <span className={`runtime-badge ${API_BASE ? 'connected' : ''}`}>
+              <i />
+              {API_BASE ? 'Playwright Chromium Connected' : 'Runtime Offline'}
+            </span>
+            <div className="top-user">
+              <div className="user-avatar small">{user.name.slice(0, 1).toUpperCase()}</div>
+              <span>{user.name}</span>
+              <button className="icon-button" onClick={logout} aria-label="Sign out" title="Sign out">
+                <LogOut size={16} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="page-content">
+          {/* ════════════ VIEW 1: TASK CONSOLE ══════════════════════════ */}
+          {view === 'console' && (
+            <>
+              <section className="page-heading">
+                <div>
+                  <div className="eyebrow"><span /> AUTONOMOUS BROWSER ASSISTANT</div>
+                  <h1>What would you like me to do?</h1>
+                  <p>Enter any website and natural-language instruction. CampusPilot executes it in visible Playwright Chromium with real-time visual feedback.</p>
+                </div>
+                <div className="trust-chip"><ShieldCheck size={16} /> Human In The Loop</div>
+              </section>
+
+              <div className="console-grid">
+                <section className="panel task-panel">
+                  <div className="panel-head">
+                    <div className="panel-icon"><Globe2 size={19} /></div>
+                    <div>
+                      <h2>Create a browser task</h2>
+                      <p>Website and natural-language instruction</p>
+                    </div>
+                    <span className="step-tag">NEW REQUEST</span>
+                  </div>
+                  <form onSubmit={e => { e.preventDefault(); if (!busy) startAgentTask(false) }}>
+                    <div className="panel-body">
+                      <Field label="Website link" hint="Use the official website address (HTTP and HTTPS supported).">
+                        <div className="input-with-icon">
+                          <Link2 size={17} />
+                          <input
+                            type="url"
+                            value={url}
+                            onChange={event => { setUrl(event.target.value); setError('') }}
+                            placeholder="http://172.16.37.58:8000/... or https://..."
+                            required
+                          />
+                        </div>
+                      </Field>
+
+                      <div className="prompt-topline">
+                        <span className="field-label">What should CampusPilot do?</span>
+                        <span className="optional-label">NATURAL LANGUAGE</span>
+                      </div>
+                      <div className="prompt-box">
+                        <textarea
+                          value={prompt}
+                          onChange={event => setPrompt(event.target.value)}
+                          maxLength={1600}
+                          rows={5}
+                          placeholder="Example: Download the hall ticket for semester exams."
+                          required
+                        />
+                        <div className="prompt-bottom">
+                          <span><Sparkles size={14} /> Clear instructions work best</span>
+                          <span>{prompt.length}/1600</span>
+                        </div>
+                      </div>
+
+                      <div className="credential-inline">
+                        <div className="credential-inline-icon"><LockKeyhole size={16} /></div>
+                        <div>
+                          <strong>Website sign-in details</strong>
+                          <small>
+                            {credentials.noLogin
+                              ? 'No sign-in required for this request'
+                              : credentials.username || credentials.password
+                              ? 'Credentials added for this session · never stored in records'
+                              : 'Optional · only needed for sites that require login'}
+                          </small>
+                        </div>
+                        <button type="button" className="button subtle" onClick={() => setCredentialModal(true)}>
+                          {credentials.noLogin || credentials.username || credentials.password ? 'Edit details' : 'Add details'}
+                        </button>
+                      </div>
+
+                      <div className="example-section">
+                        <div className="example-title">TRY AN EXAMPLE <span>Select to fill prompt</span></div>
+                        <div className="example-list">
+                          {examples.map((example, index) => (
+                            <button
+                              type="button"
+                              key={index}
+                              onClick={() => { setPrompt(example); setError('') }}
+                            >
+                              {example}
+                              <ArrowUpRight size={14} />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {error && <div className="alert alert-error"><AlertCircle size={16} />{error}</div>}
+                      {notice && <div className="alert alert-info"><CheckCircle2 size={16} />{notice}</div>}
+
+                      <div className="submit-bar">
+                        <div className="submit-note">
+                          <ShieldCheck size={16} />
+                          <span>Visible Playwright Chromium launches immediately upon confirmation.</span>
+                        </div>
+                        <button type="submit" className="button primary" disabled={busy}>
+                          {busy ? (
+                            <><LoaderCircle size={16} className="spin" /> Launching agent...</>
+                          ) : (
+                            <>Review & Start Agent <ArrowRight size={16} /></>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                </section>
+
+                <aside className="side-panels">
+                  <section className="panel runtime-panel">
+                    <div className="runtime-panel-head">
+                      <div className="panel-icon purple"><Bot size={18} /></div>
+                      <div>
+                        <h3>Automation Runtime</h3>
+                        <p>Playwright Browser Service</p>
+                      </div>
+                    </div>
+                    <div className={`runtime-state ${API_BASE ? 'ready' : 'offline'}`}>
+                      <i />
+                      {API_BASE ? 'Playwright Backend Connected' : 'Not connected'}
+                    </div>
+                    <p>
+                      {API_BASE
+                        ? `Live backend at ${API_BASE}. Headless=false enabled for visible desktop Chromium.`
+                        : 'Connect VITE_AUTOMATION_API_URL to enable live Playwright browser control.'}
+                    </p>
+                    {activeTask && (
+                      <button
+                        className="button secondary small"
+                        style={{ width: '100%', marginTop: '10px' }}
+                        onClick={() => setView('workspace')}
+                      >
+                        <Monitor size={14} /> Resume Active Workspace
+                      </button>
+                    )}
+                  </section>
+
+                  <section className="panel safety-panel">
+                    <div className="side-title">
+                      <ShieldCheck size={17} />
+                      <div>
+                        <strong>Safety Guarantees</strong>
+                        <small>Strict separation & validation</small>
+                      </div>
+                    </div>
+                    <div className="safety-item"><CheckCircle2 size={16} /><span>URL and instruction strictly separated</span></div>
+                    <div className="safety-item"><CheckCircle2 size={16} /><span>Observe-Reason-Validate-Act-Verify loop</span></div>
+                    <div className="safety-item"><CheckCircle2 size={16} /><span>In-session human approval for irreversible actions</span></div>
+                    <div className="safety-item"><CheckCircle2 size={16} /><span>Intent-specific outcome verification</span></div>
+                  </section>
+                </aside>
+              </div>
+            </>
+          )}
+
+          {/* ════════════ VIEW 2: LIVE AGENT WORKSPACE (Issue 1 & 7) ═══════ */}
+          {view === 'workspace' && activeTask && (
+            <AgentWorkspace
+              task={activeTask}
+              onStop={handleStopTask}
+              onApprovalDecision={handleApprovalDecision}
+              onNewTask={() => setView('console')}
+              onViewRecords={() => setView('records')}
+            />
+          )}
+
+          {/* ════════════ VIEW 3: PAST RECORDS ═══════════════════════════ */}
+          {view === 'records' && (
+            <>
+              <section className="page-heading compact">
+                <div>
+                  <div className="eyebrow"><span /> YOUR TASK HISTORY</div>
+                  <h1>Past records</h1>
+                  <p>Each record shows only the website link and instruction. Credentials are never saved.</p>
+                </div>
+                <button className="button primary" onClick={() => setView('console')}>
+                  <Plus size={16} /> New task
+                </button>
+              </section>
+
+              <section className="panel list-panel">
+                <div className="list-toolbar">
+                  <div>
+                    <h2>Task records</h2>
+                    <p>{records.length} saved request{records.length === 1 ? '' : 's'}</p>
+                  </div>
+                  <div className="toolbar-actions">
+                    <div className="search-box">
+                      <Search size={16} />
+                      <input
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        placeholder="Search website or prompt"
+                      />
+                    </div>
+                    <button
+                      className="button secondary small"
+                      onClick={clearRecords}
+                      disabled={!records.length}
+                    >
+                      <Trash2 size={14} /> Clear records
+                    </button>
+                  </div>
+                </div>
+
+                {filteredRecords.length === 0 ? (
+                  <div className="empty-state">
+                    <div><FileText size={23} /></div>
+                    <strong>{records.length ? 'No matching records' : 'No past records yet'}</strong>
+                    <p>Submitted website tasks will appear here, safely decoupled from login credentials.</p>
+                  </div>
+                ) : (
+                  <div className="record-table">
+                    <div className="record-table-head">
+                      <span>WEBSITE LINK</span>
+                      <span>PROMPT / INSTRUCTION</span>
+                      <span>CREATED</span>
+                      <span>STATUS</span>
+                      <span />
+                    </div>
+                    {filteredRecords.map(record => (
+                      <button
+                        key={record.id}
+                        className={`record-row ${selectedId === record.id ? 'selected' : ''}`}
+                        onClick={() => setSelectedId(selectedId === record.id ? null : record.id)}
+                      >
+                        <span className="record-website">
+                          <Globe2 size={15} />
+                          <strong>{record.url}</strong>
+                        </span>
+                        <span className="record-prompt">{record.prompt}</span>
+                        <span className="record-date">{formatDate(record.createdAt)}</span>
+                        <span><StatusPill status={record.status} /></span>
+                        <ChevronRight size={16} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {selectedRecord && (
+                  <div className="record-expanded">
+                    <div className="expanded-heading">
+                      <div>
+                        <span>REQUEST {selectedRecord.id}</span>
+                        <h3>Task details</h3>
+                      </div>
+                      <StatusPill status={selectedRecord.status} />
+                    </div>
+                    <div className="expanded-field">
+                      <label>WEBSITE LINK</label>
+                      <a href={cleanUrl(selectedRecord.url)} target="_blank" rel="noreferrer">
+                        {selectedRecord.url} <ArrowUpRight size={13} />
+                      </a>
+                    </div>
+                    <div className="expanded-field">
+                      <label>PROMPT / INSTRUCTION</label>
+                      <p>{selectedRecord.prompt}</p>
+                    </div>
+                    <div className="expanded-meta">
+                      <span>Created: {formatDate(selectedRecord.createdAt)}</span>
+                      <span>Verification: {selectedRecord.verified ? 'Verified complete' : 'Standard'}</span>
+                    </div>
+                    {selectedRecord.result && (
+                      <div className="record-result">
+                        <Info size={15} />
+                        <span>{selectedRecord.result}</span>
+                      </div>
+                    )}
+                    <button className="button danger-ghost" onClick={() => removeRecord(selectedRecord.id)}>
+                      <Trash2 size={14} /> Delete this record
+                    </button>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+
+          {/* ════════════ VIEW 4: APPROVALS ══════════════════════════════ */}
+          {view === 'approvals' && (
+            <>
+              <section className="page-heading compact">
+                <div>
+                  <div className="eyebrow"><span /> HUMAN-IN-THE-LOOP QUEUE</div>
+                  <h1>Approval queue</h1>
+                  <p>Pending consequential actions waiting for human decision.</p>
+                </div>
+              </section>
+
+              <section className="panel list-panel">
+                {activeTask?.status === 'needs_approval' ? (
+                  <div className="approval-queue" style={{ padding: '20px' }}>
+                    <article className="approval-card">
+                      <div className="approval-card-top">
+                        <span className="approval-mark"><ShieldCheck size={18} /></span>
+                        <div className="approval-card-main">
+                          <strong>Active Workspace Session</strong>
+                          <small>{activeTask.id}</small>
+                        </div>
+                        <StatusPill status="Needs approval" />
+                      </div>
+                      <div className="approval-detail">
+                        <label>TARGET SITE</label>
+                        <a href={cleanUrl(activeTask.url)} target="_blank" rel="noreferrer">
+                          {activeTask.url} <ArrowUpRight size={13} />
+                        </a>
+                      </div>
+                      <div className="approval-detail">
+                        <label>INSTRUCTION</label>
+                        <p>{activeTask.prompt}</p>
+                      </div>
+                      <div className="approval-reason">
+                        <AlertTriangle size={16} />
+                        <span>{activeTask.pending_approval?.reason || 'Irreversible operation paused.'}</span>
+                      </div>
+                      <div className="approval-actions">
+                        <button className="button primary" onClick={() => setView('workspace')}>
+                          <Monitor size={15} /> Open Live Workspace to Approve
+                        </button>
+                      </div>
+                    </article>
+                  </div>
+                ) : (
+                  <div className="empty-state">
+                    <div><ShieldCheck size={23} /></div>
+                    <strong>No tasks currently waiting for approval</strong>
+                    <p>When an active agent encounters an irreversible step, it will pause and appear here and in the live workspace.</p>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+
+          <footer className="app-footer">
+            <span>© 2026 CampusPilot</span>
+            <span><span className="footer-status" /> Live Playwright Chromium Agent</span>
+            <span>Credentials strictly separated from URL & records</span>
+          </footer>
+        </div>
+      </main>
+
+      <CredentialModal
+        open={credentialModal}
+        onClose={() => setCredentialModal(false)}
+        onSave={setCredentials}
+      />
+    </div>
+  )
 }
-
-function MessageSymbol() { return <Send size={18}/> }
 
 export default App

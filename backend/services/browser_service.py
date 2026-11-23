@@ -489,3 +489,13 @@ class BrowserService:
         except Exception as exc:
             logger.warning("Screenshot capture failed: %s", exc)
             return None
+
+    async def take_screenshot_bytes(self) -> Optional[bytes]:
+        """Capture page screenshot directly as PNG bytes for live API view."""
+        if not self._page:
+            return None
+        try:
+            return await self._page.screenshot(type="png", full_page=False)
+        except Exception as exc:
+            logger.debug("Screenshot capture bytes failed: %s", exc)
+            return None
