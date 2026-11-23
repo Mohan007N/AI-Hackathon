@@ -23,6 +23,8 @@ Frontend/.env.local
 # Logs (keep .gitkeep)
 backend/logs/*
 !backend/logs/.gitkeep
+logs/
+*.log
 
 # IDE / Editor files
 .vscode/
