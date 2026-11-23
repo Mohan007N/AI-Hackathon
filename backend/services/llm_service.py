@@ -97,6 +97,19 @@ class LLMService:
             "Content-Type": "application/json",
         }
 
+    @staticmethod
+    def _parse_json_content(raw: str) -> dict[str, Any]:
+        """Parse JSON response from LLM, stripping markdown code fences if present."""
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        return json.loads(text)
+
     # ── Task Understanding & Planning ─────────────────────────────────────────
 
     async def parse_task_request(
@@ -134,7 +147,7 @@ class LLMService:
 
         try:
             data = await self._call_openrouter_with_retry(payload)
-            plan_dict = json.loads(data["choices"][0]["message"]["content"])
+            plan_dict = self._parse_json_content(data["choices"][0]["message"]["content"])
             return self._validate_and_build_task_plan(plan_dict, clean_request)
         except Exception as exc:
             logger.warning("OpenRouter API error (%s); falling back to deterministic planner.", exc)
@@ -183,7 +196,7 @@ class LLMService:
 
         try:
             data = await self._call_openrouter_with_retry(payload)
-            decision_dict = json.loads(data["choices"][0]["message"]["content"])
+            decision_dict = self._parse_json_content(data["choices"][0]["message"]["content"])
             return self._validate_and_build_decision(decision_dict, goal)
         except Exception as exc:
             logger.warning("OpenRouter decision error (%s); falling back to deterministic reasoning.", exc)

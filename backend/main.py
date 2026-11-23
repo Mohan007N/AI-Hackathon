@@ -119,6 +119,7 @@ async def root():
 
 
 @app.get("/health", tags=["Meta"], summary="Health check")
+@app.get("/api/health", tags=["Meta"], summary="API Health check alias")
 async def health():
     warnings = settings.validate()
     return {

@@ -60,6 +60,8 @@ body { color: #172033; font-size: 15px; }
 .runtime-state { font-size: 12px; }
 .runtime-panel>p { font-size: 12px; color: #475467; }
 .runtime-hint { font-size: 11px; color: #555f73; }
+.runtime-hint.ready { background: #effaf5; border: 1px solid #d9f0e4; color: #1b7a54; }
+.runtime-hint.ready svg { color: #20a477; }
 .side-title strong { font-size: 13px; color: #263247; }
 .side-title small { font-size: 11px; color: #667085; }
 .safety-item { font-size: 12px; color: #475467; }
