@@ -141,40 +141,56 @@ class SecurityService:
         if not rule_result.is_safe:
             return rule_result
 
-        # 2. ML classifier check on webpage text
+        # 2. ML classifier check on webpage text (sliding window chunks)
         predictor = self._get_predictor()
         if predictor and predictor.is_ready:
             try:
-                # Check snippet/sample (first 1000 chars or lines)
-                snippet = content[:1000] if len(content) > 1000 else content
-                pred = predictor.predict(snippet)
-                label = pred.get("label")
-                conf = pred.get("confidence", 0.0)
+                chunk_size = 1000
+                overlap = 200
+                step = max(1, chunk_size - overlap)
+                chunks = []
+                if len(content) <= chunk_size:
+                    chunks = [content]
+                else:
+                    for i in range(0, len(content), step):
+                        c = content[i : i + chunk_size]
+                        if c.strip():
+                            chunks.append(c)
 
-                if label == "malicious" and conf >= 0.80:
-                    logger.warning(
-                        "ML classifier flagged webpage content as malicious (confidence: %.2f)",
-                        conf,
-                    )
-                    return SecurityResult(
-                        classification="malicious",
-                        is_safe=False,
-                        reason=f"ML classifier detected indirect prompt injection in webpage ({conf:.0%} confidence)",
-                        matched_rules=["ML-INJ-001"],
-                        severity=RuleSeverity.HIGH.value,
-                        ml_label=label,
-                        ml_confidence=conf,
-                    )
-                elif label == "uncertain":
-                    return SecurityResult(
-                        classification="uncertain",
-                        is_safe=False,
-                        reason="Webpage content flagged as ambiguous by security model",
-                        matched_rules=["ML-UNC-001"],
-                        severity=RuleSeverity.MEDIUM.value,
-                        ml_label=label,
-                        ml_confidence=conf,
-                    )
+                uncertain_result = None
+                for idx, chunk in enumerate(chunks):
+                    pred = predictor.predict(chunk)
+                    label = pred.get("label")
+                    conf = pred.get("confidence", 0.0)
+
+                    if label == "malicious" and conf >= 0.80:
+                        logger.warning(
+                            "ML classifier flagged webpage chunk %d as malicious (confidence: %.2f)",
+                            idx,
+                            conf,
+                        )
+                        return SecurityResult(
+                            classification="malicious",
+                            is_safe=False,
+                            reason=f"ML classifier detected indirect prompt injection in webpage ({conf:.0%} confidence)",
+                            matched_rules=["ML-INJ-001"],
+                            severity=RuleSeverity.HIGH.value,
+                            ml_label=label,
+                            ml_confidence=conf,
+                        )
+                    elif label == "uncertain" and not uncertain_result:
+                        uncertain_result = SecurityResult(
+                            classification="uncertain",
+                            is_safe=False,
+                            reason="Webpage content flagged as ambiguous by security model",
+                            matched_rules=["ML-UNC-001"],
+                            severity=RuleSeverity.MEDIUM.value,
+                            ml_label=label,
+                            ml_confidence=conf,
+                        )
+
+                if uncertain_result:
+                    return uncertain_result
             except Exception as exc:
                 logger.debug("Webpage ML check skipped due to error: %s", exc)
 

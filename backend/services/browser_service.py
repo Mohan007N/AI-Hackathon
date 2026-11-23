@@ -135,22 +135,37 @@ class BrowserService:
     # ── Navigation & Tracking ─────────────────────────────────────────────────
 
     async def navigate(self, url: str) -> dict[str, Any]:
-        """Navigate to URL and return metadata."""
+        """Navigate to URL and return metadata with strict scheme and redirect validation (Reqs 11 & 12)."""
         self._require_page()
-        if not url.startswith(("http://", "https://", "data:", "file://")):
-            url = "https://" + url
+        url_clean = url.strip()
+        url_lower = url_clean.lower()
+
+        # Requirement 12: Restrict schemes strictly to http:// and https://
+        if not (url_lower.startswith("http://") or url_lower.startswith("https://")):
+            raise BrowserServiceError(
+                f"Blocked navigation to '{url}': Only HTTP and HTTPS schemes are allowed (file, data, javascript blocked)."
+            )
 
         try:
-            response = await self._page.goto(url, wait_until="domcontentloaded")
+            response = await self._page.goto(url_clean, wait_until="domcontentloaded")
             current_url = self._page.url
             title = await self._page.title()
             self._navigation_history.append(current_url)
+
+            # Requirement 11: Validate redirects
+            from services.url_validator import URLValidator
+            validator = URLValidator()
+            redirect_check = validator.validate_redirect(current_url, url_clean)
+            if redirect_check.status == "blocked":
+                raise BrowserServiceError(f"Navigation blocked by redirect security policy: {redirect_check.reason}")
 
             return {
                 "url": current_url,
                 "title": title,
                 "status": response.status if response else None,
             }
+        except BrowserServiceError:
+            raise
         except Exception as exc:
             raise BrowserServiceError(f"Navigation to {url} failed: {exc}") from exc
 
@@ -189,8 +204,11 @@ class BrowserService:
         Uses semantic locators first; falls back to common selector patterns.
         """
         self._require_page()
-        await self.navigate(portal_url)
-        await asyncio.sleep(0.5)
+        current_u = (self._page.url or "").rstrip("/")
+        target_u = (portal_url or "").rstrip("/")
+        if not current_u or (current_u != target_u and not current_u.startswith(target_u)):
+            await self.navigate(portal_url)
+            await asyncio.sleep(0.5)
 
         # 0. Attempt semantic Page Object Model login first if supported on this page
         try:

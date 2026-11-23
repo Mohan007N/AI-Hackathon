@@ -100,13 +100,14 @@ app.add_api_route("/predict", predict_prompt_security, methods=["POST"], tags=["
 # ── Global exception handler ───────────────────────────────────────────────────
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled exception: %s %s → %s", request.method, request.url, exc, exc_info=True)
+    logger.error("Unhandled exception: %s %s → %s", request.method, request.url.path, exc, exc_info=True)
+    # Never leak internal exception details, credentials, or query parameters to client
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "error": "internal_server_error",
-            "detail": str(exc),
-            "path": str(request.url),
+            "message": "An internal server error occurred. Please contact the administrator.",
+            "path": str(request.url.path),
         },
     )
 

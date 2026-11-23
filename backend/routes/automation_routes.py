@@ -247,6 +247,10 @@ async def get_task_screenshot(task_id: str):
     "/{task_id}/approval",
     summary="Approve or deny a paused consequential action in the same browser session",
 )
+@router.post(
+    "/{task_id}/approve",
+    summary="Approve or deny alias for live agent workspace",
+)
 async def respond_to_approval(task_id: str, body: AutomationApprovalRequest):
     run = _manager.get_status(task_id)
     if not run:
@@ -290,18 +294,47 @@ async def stop_task(task_id: str):
     summary="Download a file retrieved by the agent during the task",
 )
 async def download_task_artifact(task_id: str, filename: str):
+    # Verify task ownership and isolate downloads per task (Requirement 33)
+    run = _manager.get_status(task_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task '{task_id}' not found.",
+        )
+
     safe_name = os.path.basename(filename)
-    possible_paths = [
-        os.path.join(os.getcwd(), "downloads", safe_name),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "downloads", safe_name),
-        os.path.join(os.getcwd(), "downloaded_files", safe_name),
-    ]
-    for p in possible_paths:
-        if os.path.exists(p) and os.path.isfile(p):
-            return FileResponse(p, filename=safe_name, media_type="application/octet-stream")
+    if not safe_name or safe_name != filename or ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename or path traversal detected.",
+        )
+
+    # Verify that the file was actually downloaded and registered by THIS task
+    downloaded = run.get("downloaded_files", [])
+    task_file_entry = next(
+        (f for f in downloaded if f.get("filename") == safe_name or (f.get("path") and os.path.basename(f["path"]) == safe_name)),
+        None
+    )
+    if not task_file_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Artifact '{safe_name}' does not belong to task '{task_id}'.",
+        )
+
+    # Resolve allowed file paths strictly
+    verified_path = task_file_entry.get("path")
+    if verified_path and os.path.exists(verified_path) and os.path.isfile(verified_path):
+        return FileResponse(verified_path, filename=safe_name, media_type="application/octet-stream")
+
+    # Fallback to standard download folders if path was relative
+    for folder in ["downloads", "downloaded_files"]:
+        candidate = os.path.join(os.getcwd(), folder, safe_name)
+        if os.path.exists(candidate) and os.path.isfile(candidate):
+            return FileResponse(candidate, filename=safe_name, media_type="application/octet-stream")
+
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"Artifact '{safe_name}' not found.",
+        detail=f"Artifact '{safe_name}' not found on disk.",
     )
 
 
@@ -338,11 +371,11 @@ async def execute_dashboard_task(body: AutomationStartRequest):
 
     task_id = session["task_id"]
 
-    if not session.get("allowed", False):
+    if not session.get("allowed", False) or session.get("status") == "needs_approval":
         steps = [
             "URL format & domain safety check",
             "Prompt injection rules & ML classifier",
-            f"Result: {session.get('reason')}",
+            f"Result: {session.get('reason') or session.get('status')}",
         ]
         return AutomationExecuteResponse(
             status=session["status"],

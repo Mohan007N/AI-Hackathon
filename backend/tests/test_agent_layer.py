@@ -318,6 +318,7 @@ class TestAgentOrchestrationLoop:
         mock_browser = MagicMock()
         mock_browser.start = AsyncMock()
         mock_browser.close = AsyncMock()
+        mock_browser.navigate = AsyncMock(return_value={"url": "https://college-portal.example.com", "title": "Portal", "status": 200})
         mock_browser.login = AsyncMock(return_value=True)
         mock_browser.is_session_expired = AsyncMock(return_value=False)
         mock_browser.extract_page_structure = AsyncMock(return_value={
@@ -357,6 +358,7 @@ class TestAgentOrchestrationLoop:
         mock_browser = MagicMock()
         mock_browser.start = AsyncMock()
         mock_browser.close = AsyncMock()
+        mock_browser.navigate = AsyncMock(return_value={"url": "https://college-portal.example.com", "title": "Portal", "status": 200})
         mock_browser.login = AsyncMock(return_value=True)
         mock_browser.is_session_expired = AsyncMock(return_value=False)
         mock_browser.extract_page_structure = AsyncMock(return_value={
@@ -394,6 +396,7 @@ class TestAgentOrchestrationLoop:
         mock_browser = MagicMock()
         mock_browser.start = AsyncMock()
         mock_browser.close = AsyncMock()
+        mock_browser.navigate = AsyncMock(return_value={"url": "https://college-portal.example.com", "title": "Portal", "status": 200})
         mock_browser.login = AsyncMock(return_value=True)
         mock_browser.is_session_expired = AsyncMock(return_value=False)
         mock_browser.extract_page_structure = AsyncMock(return_value={"url": "https://college-portal.example.com", "interactive": {}})
@@ -427,6 +430,7 @@ class TestAgentOrchestrationLoop:
         mock_browser = MagicMock()
         mock_browser.start = AsyncMock()
         mock_browser.close = AsyncMock()
+        mock_browser.navigate = AsyncMock(return_value={"url": "https://college-portal.example.com", "title": "Portal", "status": 200})
         mock_browser.login = AsyncMock(return_value=True)
         mock_browser.is_session_expired = AsyncMock(return_value=False)
         mock_browser.extract_page_structure = AsyncMock(return_value={

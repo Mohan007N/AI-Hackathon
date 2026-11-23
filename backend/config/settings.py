@@ -23,7 +23,7 @@ class Settings:
     # ── LLM Configuration (Groq Primary Provider) ─────────────────────────────
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
     GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
     # Deprecated fallback provider
@@ -51,6 +51,13 @@ class Settings:
 
     # ── HTTP Client ───────────────────────────────────────────────────────────
     HTTP_TIMEOUT: int = int(os.getenv("HTTP_TIMEOUT", "30"))
+
+    # ── Task Execution & Persistence ──────────────────────────────────────────
+    MAX_STEPS: int = int(os.getenv("MAX_STEPS", "25"))
+    DATABASE_PATH: str = os.getenv(
+        "DATABASE_PATH",
+        str(Path(__file__).parent.parent / "data" / "tasks.db"),
+    )
 
     # ── App ───────────────────────────────────────────────────────────────────
     APP_ENV: str = os.getenv("APP_ENV", "development")

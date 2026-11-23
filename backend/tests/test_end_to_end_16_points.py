@@ -331,22 +331,26 @@ def test_15_sse_events():
 
 
 # ── Test 16: Correct Final Status & Intent Verification ───────────────────────
-def test_16_correct_final_status():
+def test_16_correct_final_status(tmp_path):
     """Verify evidence-based outcome verification produces truthful final status."""
     manager = TaskManager()
 
-    # 1. Download verification requires file with size > 0
+    # 1. Download verification requires real file on disk with size > 0 (Requirement 20 & 35)
+    test_pdf = tmp_path / "hall_ticket.pdf"
+    test_pdf.write_bytes(b"%PDF-1.4 test content 2048 bytes minimum verification")
+    file_size = test_pdf.stat().st_size
+
     ok, reason = manager._verify_success_intent(
         intent="download_hall_ticket",
         goal="Download hall ticket",
         task_request="Download hall ticket",
         final_text="Click here to download",
         page_structure={},
-        downloaded_files=[{"filename": "hall_ticket.pdf", "size_bytes": 2048, "path": ""}],
+        downloaded_files=[{"filename": "hall_ticket.pdf", "size_bytes": file_size, "path": str(test_pdf)}],
         actions_history=[],
     )
     assert ok is True
-    assert "2048 bytes" in reason
+    assert f"{file_size} bytes" in reason
 
     # 2. Incomplete download fails truthfully
     fail_ok, fail_reason = manager._verify_success_intent(

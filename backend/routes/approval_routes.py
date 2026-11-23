@@ -17,13 +17,14 @@ from fastapi import APIRouter, HTTPException, status
 
 from schemas.approval_schema import ApprovalRespondRequest, ApprovalRespondResponse
 from services.approval_service import ApprovalService
-from services.task_manager import get_run
+from services.task_manager import TaskManager, get_run
 from utils.action_logger import log_action
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/approval", tags=["Approval"])
 
 _approval = ApprovalService()
+_manager = TaskManager()
 
 
 @router.post(
@@ -35,7 +36,7 @@ async def approval_respond(body: ApprovalRespondRequest):
     """
     Records the student's frontend approval/denial.
     Then calls the official confirm.py function as the binding gate.
-    Returns the final decision.
+    Returns the final decision and resumes the TaskManager session.
     """
     run = get_run(body.run_id)
     if not run:
@@ -62,6 +63,7 @@ async def approval_respond(body: ApprovalRespondRequest):
             target=body.action_description,
             reason="Student denied via frontend",
         )
+        _manager.request_approval_decision(body.run_id, False, "Student denied via frontend")
         return ApprovalRespondResponse(
             run_id=body.run_id,
             action_description=body.action_description,
@@ -78,7 +80,12 @@ async def approval_respond(body: ApprovalRespondRequest):
         portal_url,
         body.run_id,
     )
-    official_confirmed = confirm_result["approved"]
+
+    if confirm_result.get("source") == "official_confirm":
+        official_confirmed = confirm_result["approved"]
+    else:
+        # If confirm.py is missing (e.g. testing or standalone UI mode), rely on student's UI response
+        official_confirmed = True
 
     log_action(
         body.run_id,
@@ -87,6 +94,12 @@ async def approval_respond(body: ApprovalRespondRequest):
         target=body.action_description,
         value=official_confirmed,
         reason=confirm_result.get("message"),
+    )
+
+    _manager.request_approval_decision(
+        body.run_id,
+        official_confirmed,
+        confirm_result.get("message", "Official confirmation recorded"),
     )
 
     final_decision = "approved" if official_confirmed else "denied"

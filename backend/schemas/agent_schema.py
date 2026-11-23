@@ -15,6 +15,7 @@ class SubGoal(BaseModel):
     description: str = Field(..., description="Description of the subgoal")
     required: bool = Field(True, description="Whether this subgoal is mandatory for task completion")
     completed: bool = Field(False, description="Whether this subgoal has been verified as accomplished")
+    status: str = Field("pending", description="Subgoal status: pending, in_progress, completed, failed")
     verification_evidence: Optional[str] = Field(None, description="Evidence confirming completion")
 
 

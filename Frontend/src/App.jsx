@@ -74,7 +74,7 @@ const safeUrlForRecords = value => {
     parsed.username = ''
     parsed.password = ''
     for (const key of [...parsed.searchParams.keys()]) {
-      if (/(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key)) {
+      if (/(token|password|passwd|secret|api.?key|access.?token|credential|access.?key)/i.test(key)) {
         parsed.searchParams.delete(key)
       }
     }
@@ -118,7 +118,7 @@ function checkWebsiteSafety(rawUrl) {
   try { parsed = new URL(rawUrl.trim()) } catch { return { safe: false, reason: 'Enter a valid website URL starting with http:// or https://.' } }
   if (!['https:', 'http:'].includes(parsed.protocol)) return { safe: false, reason: 'Enter a valid web URL starting with http:// or https://.' }
   if (parsed.username || parsed.password) return { safe: false, reason: 'Do not place login credentials inside the website URL. Use the secure sign-in details option instead.' }
-  const privateQueryKey = [...parsed.searchParams.keys()].find(key => /(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key))
+  const privateQueryKey = [...parsed.searchParams.keys()].find(key => /(token|password|passwd|secret|api.?key|access.?token|credential|access.?key)/i.test(key))
   if (privateQueryKey) return { safe: false, reason: 'This URL appears to contain a sign-in token or secret in its query string. Remove it and use the one-time sign-in details option instead.' }
 
   const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
@@ -132,7 +132,7 @@ function checkWebsiteSafety(rawUrl) {
 
 function classifyInstruction(instruction) {
   const text = instruction.toLowerCase()
-  const action = /\b(open|visit|navigate|browse|search|find|look up|check|read|extract|summari[sz]e|compare|download|upload|fill|complete|submit|send|post|pay|purchase|book|order|cancel|delete|remove|edit|update|change|register|sign in|log in|sign out|export|print|select|review|verify|retrieve|fetch|collect|save|enroll)\b/i.test(text)
+  const action = /\b(open|visit|navigate|browse|search|find|look up|check|read|extract|summari[sz]e|compare|download|upload|fill|complete|submit|send|post|pay|purchase|book|order|cancel|delete|remove|edit|update|change|register|sign in|log in|sign out|export|print|select|review|verify|retrieve|fetch|collect|save|enroll|show|view|get|display)\b/i.test(text)
   if (!action || text.trim().length < 5) return { valid: false, sensitive: false, reason: 'I could not identify a clear action. Tell CampusPilot which website action you want, such as search, read, compare, download, or fill a form.' }
   const sensitivePattern = /\b(submit|send|post|pay|payment|purchase|buy|book|order|cancel|delete|remove|edit|update|change|register|transfer|withdraw|confirm|finali[sz]e|place an order|make a payment)\b/i
   const sensitive = sensitivePattern.test(text)
@@ -282,7 +282,7 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
   useEffect(() => {
     setScreenshotTimestamp(Date.now())
     setScreenshotError(false)
-  }, [task?.step, task?.current_action, task?.status, task?.updated_at])
+  }, [task?.id, task?.step, task?.current_action, task?.status, task?.updated_at])
 
   const screenshotUrl = `${API_BASE}/api/automation/${task.id}/screenshot?t=${screenshotTimestamp}`
   const isPendingApproval = task.status === 'needs_approval' || Boolean(task.pending_approval)

@@ -110,7 +110,7 @@ class LLMService:
         # Determine active model
         if self.provider == "groq" or (self.api_key and self.api_key.startswith("gsk_")):
             self.provider = "groq"
-            self.model = model or os.getenv("GROQ_MODEL") or getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b")
+            self.model = model or os.getenv("GROQ_MODEL") or getattr(settings, "GROQ_MODEL", "openai/gpt-oss-20b")
             effective_base = (
                 base_url
                 or os.getenv("GROQ_BASE_URL")
@@ -209,6 +209,16 @@ class LLMService:
         if not self._is_live_key(self.api_key):
             return self._deterministic_next_action(clean_goal, current_page_info, previous_actions)
 
+        # Build structured previous actions context (Requirement 21)
+        history_lines = []
+        for a in previous_actions[-6:]:
+            step_num = a.get("step", "?")
+            act = a.get("action", "")
+            tgt = a.get("target") or a.get("url") or ""
+            res = a.get("result") or a.get("reason") or "done"
+            history_lines.append(f"- Step {step_num}: {act} (target: {tgt}) -> {res}")
+        history_summary = "\n".join(history_lines) if history_lines else "None (first action)"
+
         prompt = (
             f"Goal: {clean_goal}\n"
             f"Original Request: {clean_request}\n"
@@ -216,7 +226,8 @@ class LLMService:
             f"Page Title: {current_page_info.get('title', '')}\n"
             f"Interactive Elements: {json.dumps(current_page_info.get('interactive', {}))[:1000]}\n"
             f"Page Text Excerpt: {current_page_info.get('text_snippet', '')[:800]}\n"
-            f"Previous Actions Count: {len(previous_actions)}\n"
+            f"Recent Actions Executed:\n{history_summary}\n"
+            f"Total Steps Taken: {len(previous_actions)}\n"
         )
 
         payload = {
@@ -255,6 +266,12 @@ class LLMService:
 
                 if resp.status_code == 200:
                     return resp.json()
+
+                if resp.status_code == 429 and ("Limit" in resp.text or "TPD" in resp.text):
+                    if payload.get("model") != "openai/gpt-oss-20b":
+                        logger.warning("Daily token limit reached for %s; switching to backup model openai/gpt-oss-20b", payload.get("model"))
+                        payload["model"] = "openai/gpt-oss-20b"
+                        continue
 
                 if resp.status_code in {429, 500, 502, 503, 504} and attempt < retries:
                     logger.warning(
@@ -393,26 +410,45 @@ class LLMService:
 
     def _deterministic_task_plan(self, request: str) -> TaskPlan:
         """
-        Deterministic, rule-based NLU engine.
-        Guarantees 100% reliable task plan creation for standard student workflows.
+        Deterministic, rule-based NLU engine with word-boundary parsing.
+        Guarantees reliable task plan creation without false substring triggers.
         """
         lower = request.lower()
 
-        # 1. Elective Registration
-        if any(w in lower for w in ["elective", "course registration", "subject choice", "enroll"]):
-            is_register = any(w in lower for w in ["register", "enroll", "opt", "choose", "add"])
+        # Check for explicit read/view verbs vs action/write verbs
+        is_view_query = bool(re.search(r"\b(show|view|check|display|list|see|inspect|what\s+is|what\s+are|get)\b", lower))
+        has_enrollment_status = bool(re.search(r"\benrollment\s+status\b|\bregistration\s+status\b", lower))
+
+        if has_enrollment_status:
+            return TaskPlan(
+                intent="check_enrollment_status",
+                goal="Check student course enrollment and registration status",
+                constraints=["current_semester"],
+                steps=["navigate_to_course_section", "extract_enrollment_status", "verify_details"],
+                actions=["navigate", "inspect_page", "extract_text", "verify", "report"],
+            )
+
+        # 1. Elective / Course Registration vs Inspection
+        if re.search(r"\b(electives?|course\s+registration|subject\s+choice|courses?)\b", lower) or (
+            re.search(r"\b(enroll|register)\b", lower) and not has_enrollment_status
+        ):
+            # Only treat as registration if active registration verb is used AND not just viewing/status
+            is_register = (
+                bool(re.search(r"\b(register|enroll\s+in|enroll\s+for|opt\s+for|add\s+elective|add\s+course|choose\s+elective)\b", lower))
+                and not is_view_query
+                and not has_enrollment_status
+            )
             constraints = []
-            if "open" in lower or "open elective" in lower:
+            if re.search(r"\bopen(\s+elective)?\b", lower):
                 constraints.append("open_elective")
-            if "clash" in lower or "conflict" in lower or "timetable" in lower:
+            if re.search(r"\b(clash|conflict|timetable)\b", lower):
                 constraints.append("no_timetable_conflict")
-            if "sem" in lower:
-                sem_match = re.search(r"sem(?:ester)?\s*(\d+)", lower)
-                if sem_match:
-                    constraints.append(f"semester_{sem_match.group(1)}")
+            sem_match = re.search(r"\bsem(?:ester)?\s*(\d+)\b", lower)
+            if sem_match:
+                constraints.append(f"semester_{sem_match.group(1)}")
 
             intent = "register_elective" if is_register else "check_electives"
-            goal = "Register for an available open elective" if is_register else "Inspect available electives"
+            goal = "Register for an available open elective" if is_register else "Inspect available open electives"
             steps = [
                 "inspect_available_electives",
                 "check_timetable",
@@ -432,7 +468,7 @@ class LLMService:
             )
 
         # 2. Hall Ticket Download
-        if any(w in lower for w in ["hall ticket", "admit card", "exam ticket", "hallticket"]):
+        if re.search(r"\b(hall\s*ticket|admit\s*card|exam\s*ticket|examination\s*pass)\b", lower):
             return TaskPlan(
                 intent="download_hall_ticket",
                 goal="Download semester exam hall ticket",
@@ -447,7 +483,7 @@ class LLMService:
             )
 
         # 3. Attendance Lookup
-        if any(w in lower for w in ["attendance", "present", "absent", "attendance percentage"]):
+        if re.search(r"\b(attendance|present|absent|attendance\s*percentage)\b", lower):
             return TaskPlan(
                 intent="check_attendance",
                 goal="Check student attendance percentage across subjects",
@@ -462,8 +498,11 @@ class LLMService:
             )
 
         # 4. Fee Management
-        if any(w in lower for w in ["fee", "tuition", "dues", "payment", "receipt"]):
-            is_pay = any(w in lower for w in ["pay", "pay fee", "make payment"])
+        if re.search(r"\b(fees?|tuition|dues|payment|receipt)\b", lower):
+            is_pay = bool(
+                re.search(r"\b(pay|make\s+payment|pay\s+fees?|pay\s+now)\b", lower)
+                and not re.search(r"\b(show|view|check|display|due|receipt|statement|structure)\b", lower)
+            )
             return TaskPlan(
                 intent="pay_fee" if is_pay else "check_fees",
                 goal="Initiate fee payment" if is_pay else "Check pending semester fee dues",
@@ -473,7 +512,7 @@ class LLMService:
             )
 
         # 5. Leave Application
-        if any(w in lower for w in ["leave", "absence", "sick leave", "permission"]):
+        if re.search(r"\b(leave|absence|sick\s*leave|apply\s+for\s+leave)\b", lower):
             return TaskPlan(
                 intent="submit_leave",
                 goal="Submit student leave application",
@@ -483,13 +522,23 @@ class LLMService:
             )
 
         # 6. Timetable
-        if any(w in lower for w in ["timetable", "schedule", "routine", "classes"]):
+        if re.search(r"\b(timetable|schedule|routine|classes)\b", lower):
             return TaskPlan(
                 intent="check_timetable",
                 goal="View class timetable and lecture schedules",
                 constraints=["weekly_schedule"],
                 steps=["navigate_to_timetable", "extract_schedule_grid", "verify_timings"],
                 actions=["navigate", "inspect_page", "extract_text", "verify", "report"],
+            )
+
+        # 7. General Document Download
+        if re.search(r"\b(download|invoice|pdf|receipt|syllabus)\b", lower):
+            return TaskPlan(
+                intent="download_document",
+                goal=f"Download document requested by student: {request[:60]}",
+                constraints=["pdf_format"],
+                steps=["locate_document_section", "trigger_download", "verify_downloaded_file"],
+                actions=["navigate", "inspect_page", "click", "download", "verify", "report"],
             )
 
         # General Query

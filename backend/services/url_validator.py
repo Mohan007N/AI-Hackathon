@@ -126,12 +126,32 @@ class URLValidator:
         else:
             passed.append("not_ip_address")
 
-        # ── 6. Port check ───────────────────────────────────────────────────
-        port = parsed.port
-        if port not in SecurityConfig.ALLOWED_PORTS:
-            failed.append(f"non_standard_port_{port}")
+        # ── 6. Port check (Requirement 9: catch invalid port parsing) ────────
+        try:
+            port = parsed.port
+        except ValueError as port_err:
+            return URLValidationResult(
+                status="blocked",
+                reason=f"Invalid URL port out of range (1-65535): {port_err}",
+                url=url, domain=hostname, checks_failed=["invalid_port"],
+            )
+
+        if port is not None:
+            if not (1 <= port <= 65535):
+                return URLValidationResult(
+                    status="blocked",
+                    reason=f"Port {port} is out of valid range (1-65535).",
+                    url=url, domain=hostname, checks_failed=["port_range"],
+                )
+            if port not in SecurityConfig.ALLOWED_PORTS:
+                if is_trusted or is_private:
+                    passed.append(f"dev_port_{port}")
+                else:
+                    failed.append(f"non_standard_port_{port}")
+            else:
+                passed.append("port")
         else:
-            passed.append("port")
+            passed.append("default_port")
 
         # ── 7. Suspicious domain keywords ────────────────────────────────────
         suspicious_hits = [
@@ -191,20 +211,25 @@ class URLValidator:
                     checks_passed=passed, checks_failed=failed,
                 )
 
-    def validate_redirect(self, redirect_url: str, original_url: str) -> URLValidationResult:
-        """Revalidate a redirect destination against the same policy."""
+    def validate_redirect(self, original_url: str, redirect_url: str) -> URLValidationResult:
+        """Revalidate a redirect destination against the same policy (Requirement 11)."""
         result = self.validate(redirect_url)
-        if result.status == "safe":
-            return result
-        # Downgrade safe→review if redirect goes to a different domain
-        orig_host = urlparse(original_url).hostname or ""
-        redir_host = urlparse(redirect_url).hostname or ""
-        if orig_host.lower() != redir_host.lower():
-            result.status = "review"
-            result.reason = (
-                f"Redirect from '{orig_host}' to '{redir_host}' — "
-                "cross-domain redirect requires review."
-            )
+        orig_host = (urlparse(original_url).hostname or "").lower()
+        redir_host = (urlparse(redirect_url).hostname or "").lower()
+
+        # If redirect goes to an untrusted domain or cross-domain, block or flag for review
+        if orig_host and redir_host and orig_host != redir_host:
+            if not self._is_trusted_domain(redir_host):
+                return URLValidationResult(
+                    status="blocked",
+                    reason=f"Cross-domain redirect from '{orig_host}' to untrusted domain '{redir_host}' is blocked.",
+                    url=redirect_url,
+                    domain=redir_host,
+                    is_trusted=False,
+                )
+            elif result.status == "safe":
+                result.status = "review"
+                result.reason = f"Redirect from '{orig_host}' to '{redir_host}' — cross-domain redirect requires review."
         return result
 
     # ── Internal ─────────────────────────────────────────────────────────────
@@ -229,10 +254,17 @@ class URLValidator:
         return False
 
     def _is_trusted_domain(self, hostname: str) -> bool:
-        """Check if hostname matches or is a subdomain of a trusted domain."""
+        """Check if hostname matches or is an approved subdomain of a trusted domain (Requirement 10)."""
         trusted_domains = [d.lower() for d in SecurityConfig.get_trusted_domains()]
         for td in trusted_domains:
-            if hostname == td or hostname.endswith("." + td):
+            # Exact match is always valid
+            if hostname == td:
+                return True
+            # Never permit subdomains of localhost, loopback, or raw IPs (e.g. evil.localhost)
+            if td in {"localhost", "127.0.0.1"} or re.match(r"^\d{1,3}(\.\d{1,3}){3}$", td):
+                continue
+            # For registered domain names, check exact subdomain structure
+            if hostname.endswith("." + td):
                 return True
         return False
 

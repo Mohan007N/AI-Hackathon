@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 from config import settings
 
+import re
+
 # Thread-safety lock per run_id
 _locks: dict[str, threading.Lock] = {}
 _global_lock = threading.Lock()
@@ -28,9 +30,19 @@ def _get_lock(run_id: str) -> threading.Lock:
 
 
 def _log_path(run_id: str) -> Path:
-    directory = Path(settings.LOG_DIRECTORY)
+    # Defend against path traversal: allow only alphanumeric, underscore, hyphen
+    if not run_id or not re.match(r"^[a-zA-Z0-9_\-]+$", run_id):
+        raise ValueError(f"Invalid run_id for logging (path traversal rejected): {run_id!r}")
+
+    directory = Path(settings.LOG_DIRECTORY).resolve()
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"{run_id}.jsonl"
+    target = (directory / f"{run_id}.jsonl").resolve()
+
+    # Ensure resolved path is strictly within the log directory
+    if directory not in target.parents and target != directory:
+        raise ValueError(f"Log path traversal detected: {run_id!r}")
+
+    return target
 
 
 def log_action(

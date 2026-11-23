@@ -39,7 +39,18 @@ def test_automation_execute_blocked_malicious_prompt():
     assert "security" in data["summary"].lower() or "blocked" in data["message"].lower()
 
 
-def test_automation_execute_safe_attendance():
+def test_automation_execute_safe_attendance(monkeypatch):
+    from routes.automation_routes import _manager
+    async def mock_execute(task_id):
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "result_status": "done",
+            "result_summary": "Attendance verified: 85% for sem 4",
+            "events": [{"title": "Step 1", "details": {"summary": "Attendance inspected"}}],
+        }
+    monkeypatch.setattr(_manager, "execute", mock_execute)
+
     resp = client.post("/api/automation/execute", json={
         "url": "https://college-portal.example.com",
         "username": "student123",
@@ -66,7 +77,18 @@ def test_automation_execute_consequential_needs_approval():
     assert "approval" in data["summary"].lower()
 
 
-def test_automation_execute_consequential_with_approval():
+def test_automation_execute_consequential_with_approval(monkeypatch):
+    from routes.automation_routes import _manager
+    async def mock_execute(task_id):
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "result_status": "done",
+            "result_summary": "Elective registered successfully",
+            "events": [{"title": "Step 1", "details": {"summary": "Elective registration completed"}}],
+        }
+    monkeypatch.setattr(_manager, "execute", mock_execute)
+
     resp = client.post("/api/automation/execute", json={
         "url": "https://college-portal.example.com",
         "username": "student123",
@@ -79,7 +101,23 @@ def test_automation_execute_consequential_with_approval():
     assert data["status"] == "completed"
 
 
-def test_automation_execute_drbexams_hall_ticket():
+def test_automation_execute_drbexams_hall_ticket(monkeypatch):
+    from routes.automation_routes import _manager
+    async def mock_execute(task_id):
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "result_status": "done",
+            "result_summary": "Downloaded hall ticket from drbexams.net successfully",
+            "events": [
+                {"title": "Step 1", "details": {"summary": "Navigate to drbexams.net"}},
+                {"title": "Step 2", "details": {"summary": "Find hall ticket link"}},
+                {"title": "Step 3", "details": {"summary": "Click download"}},
+                {"title": "Step 4", "details": {"summary": "Verified hall ticket download"}},
+            ],
+        }
+    monkeypatch.setattr(_manager, "execute", mock_execute)
+
     resp = client.post("/api/automation/execute", json={
         "url": "https://www.drbexams.net/",
         "prompt": "Download the hall ticket",
