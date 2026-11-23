@@ -92,7 +92,7 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         )
         validation = {
             "overall_status": overall,
-            "allowed_to_proceed": overall == "safe",
+            "allowed_to_proceed": overall == "safe" or (overall == "review" and body.userApproved),
             "website_validation": {"status": url_res.status, "reason": url_res.reason},
             "prompt_validation": {"status": prompt_res.status, "reason": prompt_res.reason},
             "credential_validation": {"status": "skipped", "reason": None},
@@ -107,21 +107,41 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         result=validation["overall_status"],
     )
 
-    if not validation["allowed_to_proceed"]:
+    if validation["overall_status"] == "blocked":
         reason = (
             validation["prompt_validation"].get("reason")
             or validation["website_validation"].get("reason")
             or validation["credential_validation"].get("reason")
-            or f"Security policy {validation['overall_status']}"
+            or "Security policy blocked request"
         )
         return AutomationExecuteResponse(
             status="invalid",
-            message=f"Security check {validation['overall_status']}: {reason}",
-            summary=f"Security policy prevented automation ({validation['overall_status']}).",
+            message=f"Security check blocked: {reason}",
+            summary=f"Security policy prevented automation ({reason}).",
             steps=[
                 "URL format & domain safety check",
                 "Prompt injection rules & ML classifier",
                 f"Blocked: {reason}",
+            ],
+            taskId=run_id,
+            task_id=run_id,
+        )
+
+    if validation["overall_status"] == "review" and not body.userApproved:
+        reason = (
+            validation["website_validation"].get("reason")
+            or validation["prompt_validation"].get("reason")
+            or "Explicit user authorization required for this external website."
+        )
+        return AutomationExecuteResponse(
+            status="needs_approval",
+            message=f"Security Review: {reason}",
+            summary=f"Authorization required: {reason}",
+            steps=[
+                "Website URL verified as valid HTTPS",
+                "Prompt safety verified (ML + Rules)",
+                f"Requires confirmation: {reason}",
+                "Awaiting user authorization in approval queue",
             ],
             taskId=run_id,
             task_id=run_id,

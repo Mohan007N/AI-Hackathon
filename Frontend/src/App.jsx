@@ -373,6 +373,11 @@ function App() {
       const result = redactSecrets(data.message || data.summary || 'The automation service returned a response without a summary.', secrets)
       const steps = Array.isArray(data.steps) ? data.steps.map(step => redactSecrets(step, secrets)) : [...record.steps, 'Automation service responded']
       persistRecords(current => current.map(item => item.id === record.id ? { ...item, status, result, steps, runtimeTaskId: data.taskId || data.task_id || null } : item))
+      if (data.status === 'needs_approval') {
+        persistApprovals(current => [{ ...record, id: record.id, status: 'Needs approval', reason: result }, ...current.filter(a => a.id !== record.id)].slice(0, 100))
+        setNotice(result)
+        setView('approvals')
+      }
       addLog(`Runtime result: ${status}`, { website: record.url, prompt: record.prompt, detail: result, requestId: record.id, secrets: [oneTimeCredentials.username, oneTimeCredentials.password] })
     } catch (runtimeError) {
       const detail = redactSecrets(runtimeError.response?.data?.message || runtimeError.message || 'Unknown connection error', [oneTimeCredentials.username, oneTimeCredentials.password])

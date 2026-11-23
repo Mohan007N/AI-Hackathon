@@ -78,3 +78,15 @@ def test_automation_execute_consequential_with_approval():
     data = resp.json()
     assert data["status"] == "completed"
 
+
+def test_automation_execute_drbexams_hall_ticket():
+    resp = client.post("/api/automation/execute", json={
+        "url": "https://www.drbexams.net/",
+        "prompt": "Download the hall ticket",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "completed"
+    assert "hall ticket" in data["message"].lower() or "completed" in data["summary"].lower()
+
+

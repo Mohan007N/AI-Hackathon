@@ -23,6 +23,8 @@ class SecurityConfig:
     PORTAL_URL: str = settings.PORTAL_URL
     TRUSTED_DOMAINS: list[str] = [
         "college-portal.example.com",
+        "drbexams.net",
+        "www.drbexams.net",
     ]
 
     @classmethod
