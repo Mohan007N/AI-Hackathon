@@ -75,6 +75,8 @@ async def agent_status(run_id: str):
         status=status_data.get("status", "unknown"),
         current_action=status_data.get("current_action"),
         step=status_data.get("step"),
+        progress=status_data.get("result_summary") or status_data.get("current_action"),
+        result_summary=status_data.get("result_summary"),
         error=status_data.get("error"),
     )
 

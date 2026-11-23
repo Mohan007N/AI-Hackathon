@@ -181,6 +181,11 @@ ALLOWED_ACTION_TYPES: set[str] = {
     "log",
     "confirm_request",
     "report",
+    # Irreversible operations (allowed only under confirmation gate)
+    "register_elective",
+    "drop_elective",
+    "pay_fee",
+    "submit_leave_application",
 }
 
 IRREVERSIBLE_ACTIONS: set[str] = {
