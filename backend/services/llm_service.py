@@ -1,12 +1,12 @@
 """
-LLM service using OpenRouter chat completions API with Pydantic validation.
+LLM service using Groq chat completions API with Pydantic validation.
 
 Responsibilities:
 - Understand student's natural-language request (NLU).
 - Produce a structured, machine-readable TaskPlan with intent, goal, constraints, and steps.
 - Provide step-by-step reasoning for the browser action loop (StepActionDecision).
 - NEVER send passwords, OTPs, payment credentials, or private auth details.
-- Handle rate limits, timeouts, and network errors gracefully.
+- Handle rate limits (429), timeouts, and network errors gracefully with exponential backoff.
 - Provide a deterministic NLU fallback for offline evaluation and resilience.
 """
 
@@ -85,36 +85,53 @@ class LLMServiceError(Exception):
 
 
 class LLMService:
-    """Interacts with Groq or OpenRouter LLM API to parse student requests and reason over page states."""
+    """Interacts with Groq LLM API to parse student requests and reason over page states."""
 
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        groq_key = (os.getenv("GROQ_API_KEY") or getattr(settings, "GROQ_API_KEY", "")).strip()
-        openrouter_key = (api_key or settings.OPENROUTER_API_KEY or "").strip()
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        provider: Optional[str] = None,
+    ):
+        raw_provider = provider or os.getenv("LLM_PROVIDER") or getattr(settings, "LLM_PROVIDER", "groq")
+        self.provider = raw_provider.lower().strip()
 
-        # Prioritize Groq if provided or configured
-        if (api_key and api_key.startswith("gsk_")) or (api_key is None and groq_key and groq_key.startswith("gsk_")):
+        # Read API key strictly from environment or parameter — never hardcoded
+        effective_key = (
+            api_key
+            or os.getenv("GROQ_API_KEY")
+            or getattr(settings, "GROQ_API_KEY", "")
+            or os.getenv("OPENROUTER_API_KEY")
+            or getattr(settings, "OPENROUTER_API_KEY", "")
+        )
+        self.api_key = (effective_key or "").strip()
+
+        # Determine active model
+        if self.provider == "groq" or (self.api_key and self.api_key.startswith("gsk_")):
             self.provider = "groq"
-            self.api_key = api_key if (api_key and api_key.startswith("gsk_")) else groq_key
-            self.model = model or getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b")
-            self.base_url = getattr(settings, "GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-            self._headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
+            self.model = model or os.getenv("GROQ_MODEL") or getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b")
+            effective_base = (
+                base_url
+                or os.getenv("GROQ_BASE_URL")
+                or getattr(settings, "GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+            )
         else:
-            self.provider = "openrouter"
-            self.api_key = openrouter_key
-            raw_model = model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
+            raw_model = model or os.getenv("OPENROUTER_MODEL") or getattr(settings, "OPENROUTER_MODEL", "openai/gpt-4o-mini")
             if raw_model.strip() == "nvidia/nemotron-3-ultra":
                 raw_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
             self.model = raw_model
-            self.base_url = getattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-            self._headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "HTTP-Referer": settings.FRONTEND_URL,
-                "X-Title": "Safe Web Interactive Agent",
-                "Content-Type": "application/json",
-            }
+            effective_base = (
+                base_url
+                or os.getenv("OPENROUTER_BASE_URL")
+                or getattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            )
+
+        self.base_url = effective_base.rstrip("/")
+        self._headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
 
     @staticmethod
     def _parse_json_content(raw: str) -> dict[str, Any]:
@@ -140,16 +157,16 @@ class LLMService:
     ) -> TaskPlan:
         """
         Convert student's natural-language request into a validated TaskPlan.
-        Falls back to deterministic rule-based planning if OpenRouter is unreachable or unconfigured.
+        Falls back to deterministic rule-based planning if Groq is unreachable or unconfigured.
         """
         if not student_request or not student_request.strip():
             raise LLMServiceError("Student request must not be empty.")
 
         clean_request = self._sanitize_prompt(student_request.strip())
 
-        # If OpenRouter key is not set or placeholder, use deterministic fallback
+        # If key is not live, use deterministic fallback
         if not self._is_live_key(self.api_key):
-            logger.info("Using deterministic fallback NLU planner (no live OpenRouter API key).")
+            logger.info("Using deterministic fallback NLU planner (no live Groq API key).")
             return self._deterministic_task_plan(clean_request)
 
         use_model = model or self.model
@@ -165,11 +182,11 @@ class LLMService:
         }
 
         try:
-            data = await self._call_openrouter_with_retry(payload)
+            data = await self._call_api_with_retry(payload)
             plan_dict = self._parse_json_content(data["choices"][0]["message"]["content"])
             return self._validate_and_build_task_plan(plan_dict, clean_request)
         except Exception as exc:
-            logger.warning("OpenRouter API error (%s); falling back to deterministic planner.", exc)
+            logger.warning("Groq API error (%s); falling back to deterministic planner.", exc)
             return self._deterministic_task_plan(clean_request)
 
     # ── Next Action Reasoning Loop ────────────────────────────────────────────
@@ -214,22 +231,22 @@ class LLMService:
         }
 
         try:
-            data = await self._call_openrouter_with_retry(payload)
+            data = await self._call_api_with_retry(payload)
             decision_dict = self._parse_json_content(data["choices"][0]["message"]["content"])
             return self._validate_and_build_decision(decision_dict, goal)
         except Exception as exc:
-            logger.warning("OpenRouter decision error (%s); falling back to deterministic reasoning.", exc)
+            logger.warning("Groq decision error (%s); falling back to deterministic reasoning.", exc)
             return self._deterministic_next_action(clean_goal, current_page_info, previous_actions)
 
-    # ── LLM HTTP Client with Retry (Groq / OpenRouter) ─────────────────────────
+    # ── LLM HTTP Client with Retry (Groq API) ─────────────────────────────────
 
-    async def _call_openrouter_with_retry(
+    async def _call_api_with_retry(
         self, payload: dict[str, Any], retries: int = 2
     ) -> dict[str, Any]:
-        """Execute async HTTP request to LLM provider (Groq / OpenRouter) with backoff on 429/5xx."""
+        """Execute async HTTP request to Groq API with backoff on 429 and 5xx."""
         url = f"{self.base_url}/chat/completions"
         delay = 1.0
-        provider_name = getattr(self, "provider", "llm").title()
+        provider_name = self.provider.title()
 
         for attempt in range(retries + 1):
             try:
@@ -240,7 +257,13 @@ class LLMService:
                     return resp.json()
 
                 if resp.status_code in {429, 500, 502, 503, 504} and attempt < retries:
-                    logger.warning("%s %d on attempt %d. Retrying in %.1fs...", provider_name, resp.status_code, attempt + 1, delay)
+                    logger.warning(
+                        "%s %d on attempt %d. Retrying in %.1fs...",
+                        provider_name,
+                        resp.status_code,
+                        attempt + 1,
+                        delay,
+                    )
                     await asyncio.sleep(delay)
                     delay *= 2.0
                     continue
@@ -255,6 +278,52 @@ class LLMService:
 
         raise LLMServiceError(f"{provider_name} failed after retries.")
 
+    # Retain alias for test compatibility
+    _call_openrouter_with_retry = _call_api_with_retry
+
+    # ── Health & Diagnostic Check (Requirement 9) ─────────────────────────────
+
+    async def check_connectivity(self) -> dict[str, Any]:
+        """
+        Verify Groq connectivity without exposing the API key.
+        Returns connection status, model, and latency in milliseconds.
+        """
+        if not self._is_live_key(self.api_key):
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "connected": False,
+                "key_configured": bool(self.api_key),
+                "error": "No valid API key configured (using deterministic fallback)",
+                "latency_ms": None,
+            }
+
+        start_time = asyncio.get_event_loop().time()
+        try:
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            }
+            await self._call_api_with_retry(payload, retries=1)
+            latency_ms = round((asyncio.get_event_loop().time() - start_time) * 1000, 2)
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "connected": True,
+                "latency_ms": latency_ms,
+                "key_configured": True,
+            }
+        except Exception as exc:
+            return {
+                "provider": self.provider,
+                "model": self.model,
+                "connected": False,
+                "key_configured": True,
+                "error": str(exc),
+                "latency_ms": None,
+            }
+
     # ── Validation & Sanitization ─────────────────────────────────────────────
 
     def _sanitize_prompt(self, text: str) -> str:
@@ -267,9 +336,18 @@ class LLMService:
         if not key:
             return False
         clean = key.strip()
-        if clean.startswith("gsk_") and len(clean) > 20:
+        if clean in {
+            "YOUR_GROQ_API_KEY_HERE",
+            "gsk_your_groq_api_key_here",
+            "sk-or-...",
+            "YOUR_OPENROUTER_API_KEY_HERE",
+        }:
+            return False
+        if clean.startswith("invalid-") or clean.startswith("placeholder"):
+            return False
+        if clean.startswith("gsk_") and len(clean) >= 20:
             return True
-        return not (clean.startswith("sk-or-...") or clean == "YOUR_OPENROUTER_API_KEY_HERE" or len(clean) < 20)
+        return len(clean) >= 20 and not clean.startswith("sk-or-...")
 
     def _validate_and_build_task_plan(self, data: dict[str, Any], original_request: str) -> TaskPlan:
         """Validate LLM output against Pydantic schema and allowed action whitelist."""

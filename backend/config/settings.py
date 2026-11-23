@@ -20,16 +20,18 @@ class Settings:
     PORTAL_URL: str = os.getenv("PORTAL_URL", "")
     TEAM_CODE: str = os.getenv("TEAM_CODE", "")
 
-    # ── LLM via OpenRouter & Groq ─────────────────────────────────────────────
+    # ── LLM Configuration (Groq Primary Provider) ─────────────────────────────
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 
+    # Deprecated fallback provider
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL: str = os.getenv(
         "OPENROUTER_MODEL", "openai/gpt-4o-mini"
     )
-    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
     # ── Frontend ──────────────────────────────────────────────────────────────
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
@@ -61,8 +63,11 @@ class Settings:
             warnings.append("PORTAL_URL is not set")
         if not self.TEAM_CODE:
             warnings.append("TEAM_CODE is not set")
-        if not self.OPENROUTER_API_KEY:
-            warnings.append("OPENROUTER_API_KEY is not set")
+        if self.LLM_PROVIDER == "groq":
+            if not self.GROQ_API_KEY:
+                warnings.append("GROQ_API_KEY is not set")
+        elif not self.OPENROUTER_API_KEY and not self.GROQ_API_KEY:
+            warnings.append("LLM API key is not set")
         return warnings
 
 

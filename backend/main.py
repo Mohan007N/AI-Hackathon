@@ -134,8 +134,18 @@ async def health():
         "config_warnings": warnings,
         "portal_url_set": bool(settings.PORTAL_URL),
         "team_code_set": bool(settings.TEAM_CODE),
-        "llm_key_set": bool(settings.OPENROUTER_API_KEY),
+        "llm_key_set": bool(settings.GROQ_API_KEY or settings.OPENROUTER_API_KEY),
+        "llm_provider": settings.LLM_PROVIDER,
+        "groq_model": settings.GROQ_MODEL,
     }
+
+
+@app.get("/api/llm/diagnostic", tags=["Meta"], summary="Verify Groq LLM connectivity without exposing key")
+@app.get("/health/llm", tags=["Meta"], summary="LLM connectivity diagnostic alias")
+async def llm_diagnostic():
+    from services.llm_service import LLMService
+    llm = LLMService()
+    return await llm.check_connectivity()
 
 
 # ── Dev entry point ────────────────────────────────────────────────────────────
