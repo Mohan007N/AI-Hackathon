@@ -58,8 +58,8 @@ class SecurityConfig:
                     domains.append(d)
         return list(set(domains))
 
-    # ── HTTPS requirement ─────────────────────────────────────────────────────
-    REQUIRE_HTTPS: bool = True
+    # ── HTTPS requirement (set to False for hackathon test websites) ───────────
+    REQUIRE_HTTPS: bool = os.getenv("REQUIRE_HTTPS", "false").lower() in ("true", "1")
 
     # ── Redirect policy ───────────────────────────────────────────────────────
     MAX_REDIRECTS: int = 3

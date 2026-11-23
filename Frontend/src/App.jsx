@@ -86,20 +86,12 @@ function randomSalt() {
 
 function checkWebsiteSafety(rawUrl) {
   let parsed
-  try { parsed = new URL(rawUrl.trim()) } catch { return { safe: false, reason: 'Enter a valid website URL, including https:// or http://.' } }
-  if (!['https:', 'http:'].includes(parsed.protocol)) return { safe: false, reason: 'Enter a valid website URL.' }
+  try { parsed = new URL(rawUrl.trim()) } catch { return { safe: false, reason: 'Enter a valid website URL starting with http:// or https://.' } }
+  if (!['https:', 'http:'].includes(parsed.protocol)) return { safe: false, reason: 'Enter a valid web URL starting with http:// or https://.' }
   if (parsed.username || parsed.password) return { safe: false, reason: 'Do not place login credentials inside the website URL. Use the secure sign-in details option instead.' }
   const privateQueryKey = [...parsed.searchParams.keys()].find(key => /(token|password|passwd|secret|api.?key|auth|session|credential|access.?key|code)/i.test(key))
   if (privateQueryKey) return { safe: false, reason: 'This URL appears to contain a sign-in token or secret in its query string. Remove it and use the one-time sign-in details option instead.' }
 
-  const isPrivateOrLocal = ['localhost', '127.0.0.1'].includes(parsed.hostname) ||
-    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
-    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
-    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname)
-
-  if (parsed.protocol !== 'https:' && !isPrivateOrLocal) {
-    return { safe: false, reason: 'Use an HTTPS website so information is protected in transit (HTTP is only allowed for local or intranet portals).' }
-  }
   const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
   const match = BLOCKED_DOMAINS.find(item => host === item.domain || host.endsWith(`.${item.domain}`))
   if (match) {
@@ -465,7 +457,7 @@ function App() {
               <div className="panel-head"><div className="panel-icon"><Globe2 size={19}/></div><div><h2>Create a browser task</h2><p>Website and natural-language instruction</p></div><span className="step-tag">NEW REQUEST</span></div>
               <form onSubmit={onSubmit}>
                 <div className="panel-body">
-                  <Field label="Website link" hint="Use the official website address. HTTPS is required for public sites."><div className="input-with-icon"><Link2 size={17}/><input type="url" value={url} onChange={event => { setUrl(event.target.value); setError('') }} placeholder="https://www.example.com" required/></div></Field>
+                  <Field label="Website link" hint="Use the official website address (HTTP and HTTPS supported)."><div className="input-with-icon"><Link2 size={17}/><input type="url" value={url} onChange={event => { setUrl(event.target.value); setError('') }} placeholder="http://172.16.37.58:8000/..." required/></div></Field>
                   <div className="prompt-topline"><span className="field-label">What should CampusPilot do?</span><span className="optional-label">NATURAL LANGUAGE</span></div>
                   <div className="prompt-box"><textarea value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={1600} rows={5} placeholder="Example: Open the website, find the latest invoice, download it as a PDF, and tell me where it was saved." required/><div className="prompt-bottom"><span><Sparkles size={14}/> Clear instructions work best</span><span>{prompt.length}/1600</span></div></div>
                   <div className="credential-inline"><div className="credential-inline-icon"><LockKeyhole size={16}/></div><div><strong>Website sign-in details</strong><small>{credentials.noLogin ? 'No sign-in required for this request' : credentials.username || credentials.password ? 'Details added for this request · hidden from records' : 'Optional · only needed for sites that require login'}</small></div><button type="button" className="button subtle" onClick={() => setCredentialModal(true)}>{credentials.noLogin || credentials.username || credentials.password ? 'Edit details' : 'Add details'}</button></div>

@@ -96,8 +96,13 @@ class URLValidator:
                     status="blocked", reason=f"Invalid or missing URL scheme: '{scheme}'. HTTPS required.",
                     url=url, checks_failed=["scheme"],
                 )
-        else:
+        elif scheme in {"https", "http"}:
             passed.append("scheme")
+        else:
+            return URLValidationResult(
+                status="blocked", reason=f"Invalid or missing URL scheme: '{scheme}'. HTTP or HTTPS required.",
+                url=url, checks_failed=["scheme"],
+            )
 
         # ── 4. Embedded credentials ──────────────────────────────────────────
         if parsed.username or parsed.password:
@@ -110,12 +115,12 @@ class URLValidator:
 
         # ── 5. IP-address URL ────────────────────────────────────────────────
         if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", hostname):
-            if is_trusted or is_private:
-                passed.append("trusted_ip_or_private_network")
+            if is_trusted:
+                passed.append("trusted_ip_portal")
             else:
                 return URLValidationResult(
                     status="blocked",
-                    reason="IP-address-based URL not allowed. Use a domain name.",
+                    reason="IP-address-based URL not allowed. Use a domain name or trusted portal IP.",
                     url=url, domain=hostname, checks_failed=["ip_address"],
                 )
         else:
