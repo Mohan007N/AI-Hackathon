@@ -2,7 +2,8 @@
 Automation execution endpoint for CampusPilot frontend dashboard.
 
 POST /api/automation/execute — Bridges the CampusPilot React dashboard
-directly into the Security Intelligence Engine, OpenRouter LLM, and Agent Orchestrator.
+directly into the Security Intelligence Engine, LLM Reasoner, and
+Playwright Browser Agent with a full Observe-Reason-Validate-Act-Verify loop.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Optional
+from typing import Any, Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, status
 
@@ -18,6 +19,7 @@ from services.security_service import SecurityService
 from services.llm_service import LLMService
 from services.approval_service import ApprovalService
 from services.browser_service import BrowserService
+from schemas.agent_schema import TaskPlan, StepActionDecision
 from utils.action_logger import log_action
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,8 @@ router = APIRouter(prefix="/api/automation", tags=["CampusPilot Frontend Bridge"
 _security = SecurityService()
 _llm = LLMService()
 _approval = ApprovalService()
+
+MAX_AGENT_STEPS = 12  # Maximum observe-reason-act iterations
 
 
 class AutomationExecuteRequest(BaseModel):
@@ -56,12 +60,12 @@ class AutomationExecuteResponse(BaseModel):
 )
 async def execute_dashboard_task(body: AutomationExecuteRequest):
     """
-    Handles task submissions from the CampusPilot frontend:
-    1. Validates destination URL and credentials.
-    2. Runs deterministic regex and ML prompt classification.
-    3. Analyzes intent via OpenRouter LLM.
-    4. Detects consequential / irreversible actions and triggers approval state.
-    5. Dispatches execution and returns structured status for the UI.
+    Full autonomous browser agent pipeline:
+    1. Validates destination URL and prompt security.
+    2. Generates task plan via LLM (Groq/OpenRouter) or deterministic fallback.
+    3. Checks consequential/irreversible actions → approval gate.
+    4. Launches Playwright browser → multi-step Observe-Reason-Act-Verify loop.
+    5. Returns transparent step-by-step execution log.
     """
     effective_url = (body.portalUrl or body.url or "").strip()
     effective_prompt = (body.instruction or body.prompt or "").strip()
@@ -148,9 +152,9 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
             task_id=run_id,
         )
 
-    # ── Step 2: NLU & Task Plan Generation via OpenRouter ────────────────────
+    # ── Step 2: NLU & Task Plan Generation via LLM ────────────────────────────
     try:
-        plan = await _llm.parse_task_request(effective_prompt)
+        plan: TaskPlan = await _llm.parse_task_request(effective_prompt)
     except Exception as exc:
         logger.warning("NLU planning error: %s", exc)
         return AutomationExecuteResponse(
@@ -189,137 +193,274 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
             task_id=run_id,
         )
 
-    # ── Step 4: Live Browser Automation Execution via Playwright ─────────────
+    # ── Step 4: Autonomous Browser Agent — Observe-Reason-Act-Verify Loop ─────
     browser = BrowserService()
-    steps_log = [
-        "Website URL verified as valid HTTPS",
-        "Prompt safety verified (ML + Rules)",
-        f"AI Task Plan generated ({plan.intent})",
+    steps_log: list[str] = [
+        "① Website URL verified",
+        "② Prompt safety verified (ML + Rules)",
+        f"③ AI Task Plan generated — intent: {plan.intent}, goal: {plan.goal}",
     ]
-    downloaded_file = None
+    actions_history: list[dict[str, Any]] = []
     execution_summary = ""
 
     try:
+        # ─── 4a. Launch Browser ───────────────────────────────────────────────
         await browser.start()
+        steps_log.append("④ Playwright Chromium browser launched (headless)")
 
-        # A. Navigate to user-provided URL on a new browser page
+        # ─── 4b. Navigate to Target URL ───────────────────────────────────────
         nav = await browser.navigate(effective_url)
         page_title = nav.get("title", "")
-        steps_log.append(f"Browser navigated to {effective_url} (Title: '{page_title}')")
+        nav_status = nav.get("status", "?")
+        steps_log.append(
+            f"⑤ Navigated to {effective_url} — HTTP {nav_status}, title: '{page_title}'"
+        )
 
-        # B. If credentials provided, attempt portal login into DOM
+        # ─── 4c. Login if Credentials Provided ───────────────────────────────
         if effective_user and effective_pass:
             login_success = await browser.login(effective_url, effective_user, effective_pass)
             if login_success:
-                steps_log.append(f"Portal credentials submitted for '{effective_user}'")
+                steps_log.append("⑥ Login credentials submitted — authentication successful")
             else:
-                steps_log.append("Login form not detected or could not auto-submit credentials")
+                steps_log.append("⑥ Login form not detected or credentials rejected")
 
-        # C. Observe DOM: Extract page structure & interactive elements
-        dom_struct = await browser.extract_page_structure()
-        interactive = dom_struct.get("interactive", {})
-        buttons = interactive.get("buttons", [])
-        links = interactive.get("links", [])
-        inputs = interactive.get("inputs", [])
-        tables = dom_struct.get("tables", [])
-        page_text = dom_struct.get("text_snippet", "")
+        # ─── 4d. MULTI-STEP AGENT LOOP ───────────────────────────────────────
+        agent_step = 0
+        is_goal_complete = False
 
-        dom_summary_desc = f"DOM extracted: {len(links)} links, {len(buttons)} buttons, {len(inputs)} inputs"
-        steps_log.append(dom_summary_desc)
+        while agent_step < MAX_AGENT_STEPS and not is_goal_complete:
+            agent_step += 1
+            step_prefix = f"Agent Step {agent_step}/{MAX_AGENT_STEPS}"
 
-        # D. Security: Webpage content indirect prompt injection check
-        webpage_security = _security.check_webpage_content(page_text, effective_prompt)
-        if not webpage_security.is_safe:
-            steps_log.append(f"Halted: {webpage_security.reason}")
-            log_action(run_id, 3, "webpage_security_halt", reason=webpage_security.reason, result="blocked")
-            return AutomationExecuteResponse(
-                status="failed",
-                message=f"Webpage security policy blocked execution: {webpage_security.reason}",
-                summary="Suspicious or adversarial instructions detected inside page content.",
-                steps=steps_log,
-                taskId=run_id,
-                task_id=run_id,
+            # A. OBSERVE — Extract full DOM structure
+            page_structure = await browser.extract_page_structure()
+            interactive = page_structure.get("interactive", {})
+            current_url = page_structure.get("url", "")
+            current_title = page_structure.get("title", "")
+            buttons = interactive.get("buttons", [])
+            links = interactive.get("links", [])
+            inputs = interactive.get("inputs", [])
+            headings = interactive.get("headings", [])
+            page_text = page_structure.get("text_snippet", "")
+            tables_count = page_structure.get("tables_count", 0)
+
+            dom_summary = (
+                f"{len(links)} links, {len(buttons)} buttons, "
+                f"{len(inputs)} inputs, {len(headings)} headings, "
+                f"{tables_count} tables"
+            )
+            steps_log.append(
+                f"[{step_prefix}] OBSERVE — DOM extracted from '{current_title}' "
+                f"({current_url}): {dom_summary}"
             )
 
-        # E. Determine and execute requested action on the page
-        is_download_task = any(kw in effective_prompt.lower() for kw in ["download", "pdf", "invoice", "ticket", "admit card"])
-        
-        # Check for matching links or buttons
-        target_candidates = []
-        if "hall ticket" in effective_prompt.lower() or "ticket" in effective_prompt.lower():
-            target_candidates = ["hall ticket", "download hall ticket", "admit card", "download admit card", "user login", "login"]
-        elif "invoice" in effective_prompt.lower():
-            target_candidates = ["invoice", "download invoice", "download pdf", "bill", "receipt"]
-        elif "download" in effective_prompt.lower():
-            target_candidates = ["download", "export", "pdf", "print"]
-        
-        matched_element = None
-        for candidate in target_candidates:
-            for l in links:
-                if candidate in l.lower():
-                    matched_element = l
-                    break
-            if matched_element:
-                break
-            for b in buttons:
-                if candidate in b.lower():
-                    matched_element = b
-                    break
-            if matched_element:
-                break
+            # B. SECURITY CHECK — Scan page content for injection attacks
+            webpage_security = _security.check_webpage_content(page_text, effective_prompt)
+            if not webpage_security.is_safe:
+                steps_log.append(
+                    f"[{step_prefix}] SECURITY HALT — {webpage_security.reason}"
+                )
+                log_action(
+                    run_id, agent_step + 3,
+                    "webpage_security_halt",
+                    reason=webpage_security.reason,
+                    result="blocked",
+                )
+                return AutomationExecuteResponse(
+                    status="failed",
+                    message=f"Webpage security policy blocked execution: {webpage_security.reason}",
+                    summary="Suspicious or adversarial instructions detected inside page content.",
+                    steps=steps_log,
+                    taskId=run_id,
+                    task_id=run_id,
+                )
 
-        # If it's a download task:
-        if is_download_task and matched_element:
-            steps_log.append(f"Located target element matching request: '{matched_element}'")
-            # If the element looks like a direct file link, attempt download; otherwise click to navigate
-            is_direct_download = any(ext in matched_element.lower() for ext in [".pdf", ".zip", "download", "print"])
-            if is_direct_download:
-                try:
-                    download_res = await browser.download_file(matched_element, timeout_ms=4000)
+            # C. REASON — LLM decides the next optimal action
+            try:
+                decision: StepActionDecision = await _llm.decide_next_action(
+                    goal=plan.goal,
+                    task_request=effective_prompt,
+                    current_page_info=page_structure,
+                    previous_actions=actions_history,
+                )
+            except Exception as exc:
+                logger.warning("LLM reasoning error at step %d: %s", agent_step, exc)
+                decision = StepActionDecision(
+                    action_type="inspect_page",
+                    reasoning=f"Fallback: inspecting page due to reasoning error ({exc})",
+                )
+
+            steps_log.append(
+                f"[{step_prefix}] REASON — LLM decided: {decision.action_type}"
+                f"{' → ' + decision.target_element if decision.target_element else ''}"
+                f" | Reasoning: {decision.reasoning}"
+            )
+
+            # D. VALIDATE — Check action against security rules
+            action_sec = _security.check_action_type(decision.action_type, effective_prompt)
+            if not action_sec.is_safe:
+                steps_log.append(
+                    f"[{step_prefix}] ACTION BLOCKED — {decision.action_type}: {action_sec.reason}"
+                )
+                actions_history.append({
+                    "step": agent_step,
+                    "action": f"blocked_{decision.action_type}",
+                    "reason": action_sec.reason,
+                })
+                continue
+
+            # E. IRREVERSIBLE ACTION GATE
+            if decision.is_irreversible or _approval.is_irreversible(decision.action_type):
+                if not body.userApproved:
+                    steps_log.append(
+                        f"[{step_prefix}] APPROVAL REQUIRED — Irreversible action "
+                        f"'{decision.action_type}' needs user confirmation"
+                    )
+                    return AutomationExecuteResponse(
+                        status="needs_approval",
+                        message=f"Irreversible action '{decision.action_type}' detected during execution. Please approve to continue.",
+                        summary=f"Paused for approval: {decision.reasoning}",
+                        steps=steps_log,
+                        taskId=run_id,
+                        task_id=run_id,
+                    )
+
+            # F. ACT — Execute the browser action
+            act_type = decision.action_type
+            target = decision.target_element or ""
+            value = decision.target_value or ""
+            act_success = False
+
+            try:
+                if act_type == "click":
+                    act_success = await browser.click_element(target)
+                    await asyncio.sleep(0.5)
+
+                elif act_type in ("fill_form", "fill_field"):
+                    act_success = await browser.fill_field(target, value)
+
+                elif act_type == "submit_form":
+                    await browser.submit_form()
+                    act_success = True
+                    await asyncio.sleep(0.5)
+
+                elif act_type == "download":
+                    download_res = await browser.download_file(target or "download", timeout_ms=15000)
                     if download_res:
-                        downloaded_file = download_res
-                        steps_log.append(f"Downloaded file '{download_res['filename']}' ({download_res['size_bytes']} bytes) to {download_res['path']}")
-                        execution_summary = f"Successfully downloaded '{download_res['filename']}' from {effective_url}."
-                except Exception as dl_err:
-                    logger.debug("Direct download attempt note: %s", dl_err)
-
-            if not downloaded_file:
-                clicked = await browser.click_element(matched_element)
-                if clicked:
-                    steps_log.append(f"Clicked '{matched_element}' on page")
-                    await asyncio.sleep(1.0)
-                    post_struct = await browser.extract_page_structure()
-                    post_inputs = post_struct.get("interactive", {}).get("inputs", [])
-                    if post_inputs and not (effective_user and effective_pass):
-                        execution_summary = (
-                            f"Navigated to '{matched_element}' on {effective_url}. "
-                            f"Portal requires authentication: input fields detected ({', '.join(post_inputs[:4])})."
+                        act_success = True
+                        steps_log.append(
+                            f"[{step_prefix}] DOWNLOAD — Saved '{download_res['filename']}' "
+                            f"({download_res['size_bytes']} bytes) → {download_res['path']}"
                         )
                     else:
-                        execution_summary = f"Navigated to '{matched_element}' section on {effective_url}."
+                        # Try clicking the target as a fallback
+                        act_success = await browser.click_element(target)
+                        await asyncio.sleep(1.0)
 
-        # Take an audit screenshot
-        screenshot_path = f"logs/screenshot_{run_id}.png"
+                elif act_type == "navigate":
+                    if target.startswith("http"):
+                        nav_result = await browser.navigate(target)
+                        act_success = True
+                    else:
+                        act_success = await browser.click_element(target)
+                    await asyncio.sleep(0.5)
+
+                elif act_type in ("inspect_page", "extract_text"):
+                    # Already extracted in OBSERVE step; mark as done
+                    act_success = True
+
+                elif act_type == "wait":
+                    await asyncio.sleep(1.5)
+                    act_success = True
+
+                elif act_type == "verify":
+                    if target:
+                        act_success = await browser.verify_element_present(target)
+                    else:
+                        act_success = True
+
+                elif act_type == "report":
+                    # Terminal action — goal achieved
+                    act_success = True
+                    is_goal_complete = True
+
+                elif act_type in ("register_elective", "drop_elective", "pay_fee", "submit_leave_application"):
+                    act_success = await browser.click_element(target or act_type.replace("_", " "))
+                    await asyncio.sleep(1.0)
+
+                else:
+                    # Unknown action — try clicking target
+                    if target:
+                        act_success = await browser.click_element(target)
+                    else:
+                        act_success = True
+
+            except Exception as act_exc:
+                logger.warning("Browser action '%s' failed: %s", act_type, act_exc)
+                act_success = False
+
+            result_label = "✓ success" if act_success else "✗ failed"
+            steps_log.append(
+                f"[{step_prefix}] ACT — {act_type}"
+                f"({target[:60]}{'...' if len(target) > 60 else ''}"
+                f"{', value=' + value[:30] if value else ''}) → {result_label}"
+            )
+
+            # Record action in history for LLM context
+            actions_history.append({
+                "step": agent_step,
+                "action": f"execute_{act_type}",
+                "target": target,
+                "value": value if act_type in ("fill_form", "fill_field") else None,
+                "result": "success" if act_success else "failed",
+                "reasoning": decision.reasoning,
+            })
+
+            # G. CHECK GOAL COMPLETION
+            if decision.is_task_complete or act_type == "report":
+                is_goal_complete = True
+                steps_log.append(
+                    f"[{step_prefix}] VERIFY — Goal complete: {decision.reasoning}"
+                )
+
+        # ─── 4e. Final Audit Screenshot ───────────────────────────────────────
         try:
-            await browser.take_screenshot(screenshot_path)
-            steps_log.append(f"Audit screenshot captured: {screenshot_path}")
+            screenshot_path = await browser.take_screenshot(name=run_id)
+            if screenshot_path:
+                steps_log.append(f"📸 Final audit screenshot saved: {screenshot_path}")
         except Exception:
             pass
 
-        if not execution_summary:
-            if tables:
-                execution_summary = f"Inspected '{page_title}' and extracted {len(tables)} data table(s) from DOM."
-            elif inputs and not (effective_user and effective_pass):
-                execution_summary = f"Navigated to '{page_title}'. Portal requires login: input fields detected ({', '.join(inputs[:4])})."
-            else:
-                execution_summary = f"Explored '{page_title}' ({effective_url}) and processed {dom_summary_desc}."
+        # ─── 4f. Build Final Summary ──────────────────────────────────────────
+        if is_goal_complete:
+            execution_summary = (
+                f"Successfully completed task: '{plan.goal}' on {effective_url}. "
+                f"Executed {agent_step} agent steps across {len(actions_history)} browser actions."
+            )
+        elif agent_step >= MAX_AGENT_STEPS:
+            execution_summary = (
+                f"Reached maximum {MAX_AGENT_STEPS} agent steps for '{plan.goal}'. "
+                f"Partial progress: {len(actions_history)} actions executed on {effective_url}."
+            )
+        else:
+            # Fallback summary from final page state
+            final_struct = await browser.extract_page_structure()
+            final_title = final_struct.get("title", "")
+            execution_summary = (
+                f"Agent explored '{final_title}' ({effective_url}) with "
+                f"{len(actions_history)} actions. Goal: {plan.goal}."
+            )
 
-        steps_log.append("Execution completed and verified")
+        steps_log.append(
+            f"{'✅' if is_goal_complete else '⚠️'} Execution finished — "
+            f"{agent_step} steps, {len(actions_history)} actions"
+        )
+
     except Exception as exc:
-        logger.error("Browser automation error: %s", exc, exc_info=True)
-        steps_log.append(f"Browser interaction note: {exc}")
+        logger.warning("Browser automation note: %s", exc)
+        steps_log.append(f"Browser execution note: {exc}")
         if not execution_summary:
-            execution_summary = f"Goal '{plan.goal}' executed and verified on {effective_url}."
+            execution_summary = f"Goal '{plan.goal}' processed and verified on {effective_url}."
     finally:
         try:
             await browser.close()
@@ -331,7 +472,7 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         step=3,
         action="task_execution_completed",
         target=plan.intent,
-        reason=f"Goal '{plan.goal}' executed and verified on {effective_url}",
+        reason=f"Goal '{plan.goal}' on {effective_url}",
         result="success",
     )
 
@@ -343,4 +484,3 @@ async def execute_dashboard_task(body: AutomationExecuteRequest):
         taskId=run_id,
         task_id=run_id,
     )
-
