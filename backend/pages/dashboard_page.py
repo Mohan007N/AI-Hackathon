@@ -122,3 +122,4 @@ class DashboardPage(BasePage):
         """Click the Hall Ticket download or navigation link."""
         await self.hall_ticket_link.click()
         await self.wait_for_load_state("domcontentloaded")
+

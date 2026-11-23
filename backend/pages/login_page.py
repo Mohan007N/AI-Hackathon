@@ -102,3 +102,4 @@ class LoginPage(BasePage):
         if await self.is_visible(self.error_banner):
             return await self.get_text(self.error_banner)
         return None
+

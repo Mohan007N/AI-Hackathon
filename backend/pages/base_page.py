@@ -112,3 +112,4 @@ class BasePage:
         """Capture screenshot as bytes and optionally save to path."""
         data = await self.page.screenshot(path=path, full_page=full_page)
         return data
+

@@ -96,3 +96,4 @@ class ExaminationPage(BasePage):
         except Exception as exc:
             logger.error("ExaminationPage: Download failed: %s", exc)
             return None
+
