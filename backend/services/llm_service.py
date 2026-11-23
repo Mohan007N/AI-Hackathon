@@ -85,7 +85,10 @@ class LLMService:
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or settings.OPENROUTER_API_KEY
-        self.model = model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
+        raw_model = model or settings.OPENROUTER_MODEL or "openai/gpt-4o-mini"
+        if raw_model.strip() == "nvidia/nemotron-3-ultra":
+            raw_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        self.model = raw_model
         self.base_url = getattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self._headers = {
             "Authorization": f"Bearer {self.api_key}",

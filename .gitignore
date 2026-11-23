@@ -11,6 +11,14 @@ ENV/
 
 # Environment variables
 .env
+*.env
+*.env.local
+
+# Frontend build & dependencies
+Frontend/node_modules/
+Frontend/dist/
+Frontend/.env
+Frontend/.env.local
 
 # Logs (keep .gitkeep)
 backend/logs/*

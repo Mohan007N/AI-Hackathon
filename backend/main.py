@@ -26,6 +26,7 @@ from routes.agent_routes import router as agent_router
 from routes.approval_routes import router as approval_router
 from routes.report_routes import router as report_router
 from routes.security_routes import router as security_router
+from routes.automation_routes import router as automation_router
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -68,7 +69,14 @@ app = FastAPI(
 # ── CORS ───────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=[
+        settings.FRONTEND_URL,
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +88,7 @@ app.include_router(agent_router)
 app.include_router(approval_router)
 app.include_router(report_router)
 app.include_router(security_router)
+app.include_router(automation_router)
 
 
 # ── Global exception handler ───────────────────────────────────────────────────
