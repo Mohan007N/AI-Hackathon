@@ -20,7 +20,11 @@ class Settings:
     PORTAL_URL: str = os.getenv("PORTAL_URL", "")
     TEAM_CODE: str = os.getenv("TEAM_CODE", "")
 
-    # ── LLM via OpenRouter ────────────────────────────────────────────────────
+    # ── LLM via OpenRouter & Groq ─────────────────────────────────────────────
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+
     OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
     OPENROUTER_MODEL: str = os.getenv(
         "OPENROUTER_MODEL", "openai/gpt-4o-mini"
