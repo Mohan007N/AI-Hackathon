@@ -54,25 +54,28 @@ Output JSON Schema:
 
 # System prompt for dynamic next-action reasoning in the agent loop
 _REASONER_SYSTEM_PROMPT = """
-You are the reasoning engine of a Safe Web Interactive Agent navigating a college portal.
-Based on the student's goal, the current page observation, and past actions, determine the single next safe action.
+You are the reasoning engine of a Safe Web Interactive Agent navigating a college portal or web service.
+Based on the student's goal, the current page observation (including observed elements with temporary IDs like elem_1), and past actions, determine the single next safe action.
 
 STRICT RULES:
 1. Output ONLY valid JSON matching the schema below.
 2. The action_type MUST be one of:
    navigate, inspect_page, extract_text, click, fill_form, submit_form, download, wait, verify, report
-3. NEVER produce code, scripts, or instructions to leak credentials or bypass confirmation.
-4. If the action is irreversible (e.g. register_elective, drop_elective, pay_fee, submit_leave_application), set is_irreversible: true.
-5. If the goal has been fully accomplished, set is_task_complete: true and action_type: "report".
+3. target_element can be a temporary element ID (e.g. "elem_1") or semantic label/text of the element.
+4. NEVER produce code, scripts, or instructions to leak credentials or bypass confirmation.
+5. If the action is irreversible (e.g. pay_fee, register_elective, delete, submit), set is_irreversible: true.
+6. If all required subgoals and the goal have been fully accomplished and verified, set is_task_complete: true and action_type: "report".
+7. If there are multiple subgoals (e.g. pay fee then download), complete them in strict sequence.
 
 Output JSON Schema:
 {
   "action_type": "<action_keyword>",
-  "target_element": "<semantic label or text of button/link/input, or null>",
+  "target_element": "<element_id such as elem_1, or semantic label/text, or null>",
   "target_value": "<value to input if filling form, or null>",
   "reasoning": "<concise explanation of why this action advances the goal>",
   "is_irreversible": false,
-  "is_task_complete": false
+  "is_task_complete": false,
+  "subgoal_id_completed": "<id of subgoal completed by this action, if any, or null>"
 }
 """.strip()
 
@@ -305,6 +308,7 @@ class LLMService:
             reasoning=str(data.get("reasoning", f"Executing {action_type} for goal: {goal}")),
             is_irreversible=is_irrev,
             is_task_complete=bool(data.get("is_task_complete", False)),
+            subgoal_id_completed=data.get("subgoal_id_completed"),
         )
 
     # ── Deterministic NLU Fallback ────────────────────────────────────────────
@@ -422,7 +426,7 @@ class LLMService:
     def _deterministic_next_action(
         self, goal: str, page_info: dict[str, Any], history: list[dict[str, Any]]
     ) -> StepActionDecision:
-        """Deterministic step reasoning based on state transitions."""
+        """Deterministic step reasoning based on state transitions and observed elements."""
         dispatch_types = {
             "inspect_page", "extract_text", "click", "fill_form", "submit_form",
             "download", "wait", "verify", "register_elective", "drop_elective",
@@ -436,7 +440,16 @@ class LLMService:
         interactive = page_info.get("interactive", {})
         buttons = [b.lower() for b in interactive.get("buttons", [])]
         links = [l.lower() for l in interactive.get("links", [])]
+        elements = page_info.get("elements", [])
         goal_lower = goal.lower()
+
+        def _find_elem(keywords: list[str]) -> Optional[str]:
+            """Helper to find matching element ID or semantic text."""
+            for el in elements:
+                t = (el.get("text") or el.get("aria_label") or el.get("placeholder") or "").lower()
+                if any(k in t for k in keywords):
+                    return el.get("id") or el.get("text")
+            return None
 
         # Step 1: Inspect if not inspected yet
         if "inspect_page" not in executed_dispatches and not executed_dispatches:
@@ -445,16 +458,43 @@ class LLMService:
                 reasoning="Inspect initial page state and available navigational options.",
             )
 
+        # Compound Goal: Fee payment + Download hall ticket (Issue D)
+        if ("pay" in goal_lower or "fee" in goal_lower) and ("ticket" in goal_lower or "download" in goal_lower or "admit" in goal_lower):
+            if "pay_fee" not in executed_dispatches:
+                target = _find_elem(["pay", "fee", "payment"]) or "Pay Now"
+                return StepActionDecision(
+                    action_type="pay_fee",
+                    target_element=target,
+                    reasoning="Complete fee payment step",
+                    is_irreversible=True,
+                    subgoal_id_completed="subgoal_4",
+                )
+            if "download" not in executed_dispatches:
+                target = _find_elem(["hall ticket", "download", "admit card"]) or "Download Hall Ticket"
+                return StepActionDecision(
+                    action_type="download",
+                    target_element=target,
+                    reasoning=f"Download hall ticket via '{target}'",
+                    subgoal_id_completed="subgoal_7",
+                )
+            return StepActionDecision(
+                action_type="report",
+                reasoning="Both payment and hall ticket download steps executed successfully.",
+                is_task_complete=True,
+                subgoal_id_completed="subgoal_8",
+            )
+
         # Step 2: Goal-specific action progression
-        if "elective" in goal_lower:
-            if "register" in goal_lower and "register_elective" not in executed_dispatches:
+        if "elective" in goal_lower or "enroll" in goal_lower:
+            if ("register" in goal_lower or "enroll" in goal_lower) and "register_elective" not in executed_dispatches:
+                target = _find_elem(["register", "enroll", "opt"]) or "Register Elective"
                 return StepActionDecision(
                     action_type="register_elective",
-                    target_element="Register Elective",
+                    target_element=target,
                     reasoning="Submit elective registration for selected course",
                     is_irreversible=True,
                 )
-            match = next((b for b in buttons + links if any(k in b for k in ["elective", "course", "registration"])), None)
+            match = _find_elem(["elective", "course", "registration"]) or next((b for b in buttons + links if any(k in b for k in ["elective", "course", "registration"])), None)
             if match and "click" not in executed_dispatches:
                 return StepActionDecision(
                     action_type="click",
@@ -464,7 +504,7 @@ class LLMService:
 
         if "ticket" in goal_lower or "admit" in goal_lower:
             if "download" not in executed_dispatches:
-                match = next((b for b in buttons + links if any(k in b for k in ["download", "hall ticket", "admit card"])), "Download Hall Ticket")
+                match = _find_elem(["download", "hall ticket", "admit card"]) or next((b for b in buttons + links if any(k in b for k in ["download", "hall ticket", "admit card"])), "Download Hall Ticket")
                 return StepActionDecision(
                     action_type="download",
                     target_element=match,
@@ -473,7 +513,7 @@ class LLMService:
 
         if "attendance" in goal_lower:
             if "click" not in executed_dispatches:
-                match = next((b for b in buttons + links if "attendance" in b), "View Attendance")
+                match = _find_elem(["attendance", "records"]) or next((b for b in buttons + links if "attendance" in b), "View Attendance")
                 return StepActionDecision(
                     action_type="click",
                     target_element=match,
@@ -481,9 +521,10 @@ class LLMService:
                 )
 
         if "pay" in goal_lower and "pay_fee" not in executed_dispatches:
+            target = _find_elem(["pay", "fee"]) or "Pay Now"
             return StepActionDecision(
                 action_type="pay_fee",
-                target_element="Pay Now",
+                target_element=target,
                 reasoning="Complete fee payment",
                 is_irreversible=True,
             )

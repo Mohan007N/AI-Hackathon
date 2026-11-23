@@ -88,7 +88,7 @@ class AutomationStatusResponse(BaseModel):
 
 
 class AutomationExecuteResponse(BaseModel):
-    status: str       # "completed" | "needs_approval" | "invalid" | "failed" | "not_executed"
+    status: str       # "completed" | "needs_approval" | "invalid" | "failed" | "not_done" | "stopped"
     message: str
     summary: Optional[str] = None
     steps: list[str] = Field(default_factory=list)
@@ -359,18 +359,26 @@ async def execute_dashboard_task(body: AutomationStartRequest):
     events = result.get("events", [])
     steps_log = [f"{e.get('title')}: {e.get('details', {}).get('summary', '')}" for e in events if e.get("title")]
     if not steps_log:
-        steps_log = ["Execution completed and verified"]
+        steps_log = [f"Execution status: {result.get('status', 'unknown')}"]
 
-    res_status = result.get("status", "completed")
-    if res_status in {"done", "completed"}:
+    raw_status = result.get("status", "unknown")
+    result_status = result.get("result_status")
+    
+    # Truthful status mapping (Section A: Never convert failed/not_done into completed)
+    if raw_status in {"done", "completed"} and result_status == "done":
         res_status = "completed"
-    elif res_status in {"not_done", "failed"}:
-        res_status = "completed"  # Return completed with summary note for test assertions
+    elif raw_status == "needs_approval":
+        res_status = "needs_approval"
+    elif raw_status == "stopped":
+        res_status = "stopped"
+    elif raw_status in {"failed", "not_done"} or result_status == "not_done":
+        res_status = "failed" if raw_status == "failed" else "not_done"
+    else:
+        res_status = raw_status
 
-    plan_goal = (result.get("plan") or {}).get("goal") or (session.get("plan") or {}).get("goal") or effective_prompt
-    summary = result.get("result_summary")
-    if not summary or "navigation to" in summary.lower() or "error:" in summary.lower():
-        summary = f"Goal '{plan_goal}' processed and verified for {effective_url}."
+    summary = result.get("result_summary") or result.get("error")
+    if not summary:
+        summary = f"Task execution finished with status: {res_status}"
 
     return AutomationExecuteResponse(
         status=res_status,

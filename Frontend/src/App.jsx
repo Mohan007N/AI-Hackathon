@@ -733,6 +733,30 @@ function App() {
   const [activeTask, setActiveTask] = useState(() => {
     try { return JSON.parse(sessionStorage.getItem(ACTIVE_TASK_KEY) || 'null') } catch { return null }
   })
+  const [backendHealthy, setBackendHealthy] = useState(false)
+
+  // Real HTTP probe for backend health (Section G: checked rather than inferred)
+  useEffect(() => {
+    if (!API_BASE) {
+      setBackendHealthy(false)
+      return
+    }
+    let isMounted = true
+    const checkHealth = async () => {
+      try {
+        const resp = await axios.get(`${API_BASE}/health`, { timeout: 3500 })
+        if (isMounted) setBackendHealthy(resp.status === 200)
+      } catch {
+        if (isMounted) setBackendHealthy(false)
+      }
+    }
+    checkHealth()
+    const interval = setInterval(checkHealth, 8000)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [])
 
   // Sync session & local storage
   useEffect(() => {
@@ -814,40 +838,59 @@ function App() {
       timer = setInterval(pollStatus, 1500)
     }
 
-    // Set up SSE EventSource for real-time action events
+    // Set up SSE EventSource for real-time action events with auto-reconnection (Section G)
     let eventSource = null
-    try {
-      eventSource = new EventSource(`${API_BASE}/api/automation/${taskId}/events`)
-      eventSource.onmessage = e => {
-        try {
-          const payload = JSON.parse(e.data)
-          if (payload) {
-            setActiveTask(prev => {
-              if (!prev || prev.id !== taskId) return prev
-              const existingEvents = prev.events || []
-              const updatedEvents = [...existingEvents, payload]
-              return {
-                ...prev,
-                events: updatedEvents,
-                updated_at: isoNow(),
-              }
-            })
+    let reconnectTimeout = null
+    let isCancelled = false
+
+    const connectSSE = () => {
+      if (isCancelled || isFinished) return
+      try {
+        eventSource = new EventSource(`${API_BASE}/api/automation/${taskId}/events`)
+        eventSource.onmessage = e => {
+          try {
+            const payload = JSON.parse(e.data)
+            if (payload) {
+              setActiveTask(prev => {
+                if (!prev || prev.id !== taskId) return prev
+                const existingEvents = prev.events || []
+                if (payload.id && existingEvents.some(ev => ev.id === payload.id)) {
+                  return prev
+                }
+                return {
+                  ...prev,
+                  events: [...existingEvents, payload],
+                  updated_at: isoNow(),
+                }
+              })
+            }
+          } catch {
+            // parse error
           }
-        } catch {
-          // parse error
+        }
+        eventSource.onerror = () => {
+          try { eventSource?.close() } catch {}
+          eventSource = null
+          if (!isCancelled && !isFinished) {
+            reconnectTimeout = setTimeout(connectSSE, 2000)
+          }
+        }
+      } catch {
+        if (!isCancelled && !isFinished) {
+          reconnectTimeout = setTimeout(connectSSE, 2500)
         }
       }
-      eventSource.onerror = () => {
-        // Close on error; polling will handle it
-        eventSource?.close()
-      }
-    } catch {
-      // EventSource failed or unsupported
     }
 
+    connectSSE()
+
     return () => {
+      isCancelled = true
       if (timer) clearInterval(timer)
-      if (eventSource) eventSource.close()
+      if (reconnectTimeout) clearTimeout(reconnectTimeout)
+      if (eventSource) {
+        try { eventSource.close() } catch {}
+      }
     }
   }, [activeTask?.id, activeTask?.status])
 
@@ -1190,10 +1233,10 @@ function App() {
             <div className="runtime-mini-head">
               <Bot size={16} />
               <span>RUNTIME</span>
-              <i className={API_BASE ? 'online' : ''} />
+              <i className={backendHealthy ? 'online' : ''} />
             </div>
-            <strong>{API_BASE ? 'Playwright Connected' : 'Runtime Offline'}</strong>
-            <p>{API_BASE ? 'Local Chromium execution active' : 'Connect VITE_AUTOMATION_API_URL'}</p>
+            <strong>{backendHealthy ? 'Playwright Connected' : 'Runtime Offline'}</strong>
+            <p>{backendHealthy ? 'Local Chromium execution active' : API_BASE ? 'Probing backend at ' + API_BASE : 'Connect VITE_AUTOMATION_API_URL'}</p>
           </div>
           <div className="account-mini">
             <div className="user-avatar">{user.name.slice(0, 1).toUpperCase()}</div>
@@ -1231,9 +1274,9 @@ function App() {
             </div>
           </div>
           <div className="topbar-trailing">
-            <span className={`runtime-badge ${API_BASE ? 'connected' : ''}`}>
+            <span className={`runtime-badge ${backendHealthy ? 'connected' : ''}`}>
               <i />
-              {API_BASE ? 'Playwright Chromium Connected' : 'Runtime Offline'}
+              {backendHealthy ? 'Playwright Chromium Connected' : 'Backend Offline'}
             </span>
             <div className="top-user">
               <div className="user-avatar small">{user.name.slice(0, 1).toUpperCase()}</div>
@@ -1364,14 +1407,14 @@ function App() {
                         <p>Playwright Browser Service</p>
                       </div>
                     </div>
-                    <div className={`runtime-state ${API_BASE ? 'ready' : 'offline'}`}>
+                    <div className={`runtime-state ${backendHealthy ? 'ready' : 'offline'}`}>
                       <i />
-                      {API_BASE ? 'Playwright Backend Connected' : 'Not connected'}
+                      {backendHealthy ? 'Playwright Backend Connected' : 'Backend Not Reachable'}
                     </div>
                     <p>
-                      {API_BASE
-                        ? `Live backend at ${API_BASE}. Headless=false enabled for visible desktop Chromium.`
-                        : 'Connect VITE_AUTOMATION_API_URL to enable live Playwright browser control.'}
+                      {backendHealthy
+                        ? `Live backend healthy at ${API_BASE}. Visible desktop Chromium active.`
+                        : `Probing backend at ${API_BASE || 'http://localhost:8000'}. Make sure FastAPI is running.`}
                     </p>
                     {activeTask && (
                       <button

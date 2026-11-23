@@ -36,6 +36,7 @@ class BrowserService:
         self._page = None
         self._context = None
         self._navigation_history: list[str] = []
+        self._element_registry: dict[str, dict[str, Any]] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -68,21 +69,25 @@ class BrowserService:
                 await self._page.close()
             except Exception:
                 pass
+            self._page = None
         if self._context:
             try:
                 await self._context.close()
             except Exception:
                 pass
+            self._context = None
         if self._browser:
             try:
                 await self._browser.close()
             except Exception:
                 pass
+            self._browser = None
         if self._playwright:
             try:
                 await self._playwright.stop()
             except Exception:
                 pass
+            self._playwright = None
         logger.info("Browser closed.")
 
     def _require_page(self):
@@ -196,9 +201,9 @@ class BrowserService:
         except Exception as pom_err:
             logger.debug("POM login attempt bypassed; falling back to dynamic fuzzy locators: %s", pom_err)
 
-        # 1. Fill Username (try label, placeholder, role, then common selectors)
+        # 1. Fill Username (accessible labels, role, placeholder, explicit attributes — never generic text inputs)
         filled_user = False
-        for user_label in ["Username", "User ID", "Roll Number", "Student ID", "Email", "Login ID"]:
+        for user_label in ["Username", "User ID", "Roll Number", "Student ID", "Email", "Login ID", "Enrollment Number"]:
             try:
                 field = self._page.get_by_label(re.compile(user_label, re.I))
                 if await field.count() > 0:
@@ -210,9 +215,18 @@ class BrowserService:
 
         if not filled_user:
             u_selectors = username_selectors or [
-                'input[type="text"]', 'input[name*="user"]',
-                'input[name*="email"]', 'input[id*="user"]', 'input[id*="roll"]',
-                'input[placeholder*="user" i]', 'input[placeholder*="roll" i]',
+                'input[autocomplete="username"]',
+                'input[name*="user" i]',
+                'input[name*="email" i]',
+                'input[name*="login" i]',
+                'input[id*="user" i]',
+                'input[id*="roll" i]',
+                'input[id*="email" i]',
+                'input[id*="login" i]',
+                'input[placeholder*="user" i]',
+                'input[placeholder*="roll" i]',
+                'input[placeholder*="email" i]',
+                'input[placeholder*="student" i]',
             ]
             filled_user = await self._try_fill(u_selectors, username)
 
@@ -228,7 +242,10 @@ class BrowserService:
 
         if not filled_pass:
             p_selectors = password_selectors or [
-                'input[type="password"]', 'input[name*="pass"]', 'input[id*="pass"]',
+                'input[type="password"]',
+                'input[autocomplete="current-password"]',
+                'input[name*="pass" i]',
+                'input[id*="pass" i]',
             ]
             filled_pass = await self._try_fill(p_selectors, password)
 
@@ -253,9 +270,60 @@ class BrowserService:
             pass
 
         await asyncio.sleep(0.5)
-        # Verify login was successful (not stuck on login page)
-        expired = await self.is_session_expired()
-        return not expired
+        # Verify actual authentication success (not error banner and not stuck on login form)
+        authenticated = await self.is_authenticated()
+        logger.info("Login verification on %s: authenticated=%s", portal_url, authenticated)
+        return authenticated
+
+    async def is_authenticated(self) -> bool:
+        """
+        Detect actual authentication success.
+        Returns False if login error banner is visible, password field is still present,
+        or current page is a login/signin page without dashboard elements.
+        Returns True if dashboard, logout, or session user elements are visible.
+        """
+        self._require_page()
+        try:
+            # 1. Check for explicit login failure / error messages
+            text = (await self.get_page_text()).lower()
+            error_keywords = [
+                "invalid credentials", "invalid username or password",
+                "incorrect password", "wrong password", "login failed",
+                "authentication failed", "user not found", "access denied",
+                "bad credentials"
+            ]
+            if any(k in text for k in error_keywords):
+                logger.warning("Authentication failed: error banner detected on page")
+                return False
+
+            # 2. Check if password field is still present and visible on page
+            pass_inputs = self._page.locator('input[type="password"]')
+            if await pass_inputs.count() > 0:
+                for idx in range(await pass_inputs.count()):
+                    if await pass_inputs.nth(idx).is_visible():
+                        logger.warning("Authentication uncertain: password field still visible on page")
+                        return False
+
+            # 3. Check for positive authentication indicators
+            auth_indicators = [
+                self._page.get_by_role("button", name=re.compile(r"log\s*out|sign\s*out", re.I)),
+                self._page.get_by_role("link", name=re.compile(r"log\s*out|sign\s*out", re.I)),
+                self._page.locator("#dashboard, .dashboard, [data-testid='dashboard']"),
+                self._page.get_by_role("heading", name=re.compile(r"dashboard|welcome|student portal|overview", re.I)),
+            ]
+            for indicator in auth_indicators:
+                if await indicator.count() > 0 and await indicator.first.is_visible():
+                    return True
+
+            # 4. If URL indicates login/signin and no positive auth indicator, not authenticated
+            url_lower = self._page.url.lower()
+            if "/login" in url_lower or "/signin" in url_lower:
+                return False
+
+            return True
+        except Exception as exc:
+            logger.warning("Error checking authentication status: %s", exc)
+            return False
 
     async def is_session_expired(self) -> bool:
         """Check if portal returned to login or displayed session timeout notification."""
@@ -370,11 +438,67 @@ class BrowserService:
             return []
 
     async def extract_page_structure(self) -> dict[str, Any]:
-        """Return comprehensive semantic snapshot of the page for reasoning."""
+        """
+        Return comprehensive semantic snapshot of the page for reasoning (Issue C).
+        Assigns temporary element IDs (elem_1, elem_2, ...) to observed interactive elements.
+        """
         self._require_page()
         url = self._page.url
         title = await self._page.title()
         text = await self.get_page_text()
+
+        # Extract structured interactive elements with temporary element IDs
+        structured_elements = []
+        try:
+            structured_elements = await self._page.evaluate(
+                """() => {
+                    let counter = 1;
+                    const items = [];
+                    // Reset previous data-agent-id tags
+                    document.querySelectorAll('[data-agent-id]').forEach(el => el.removeAttribute('data-agent-id'));
+
+                    const candidates = document.querySelectorAll(
+                        'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"]'
+                    );
+
+                    for (const el of candidates) {
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || el.offsetParent === null) {
+                            continue;
+                        }
+
+                        const eid = 'elem_' + (counter++);
+                        el.setAttribute('data-agent-id', eid);
+
+                        const tag = el.tagName.toLowerCase();
+                        const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag === 'button' ? 'button' : tag);
+                        const txt = (el.innerText || el.value || '').trim().replace(/\\s+/g, ' ');
+                        const placeholder = el.getAttribute('placeholder') || '';
+                        const name = el.getAttribute('name') || '';
+                        const ariaLabel = el.getAttribute('aria-label') || '';
+                        const type = el.getAttribute('type') || '';
+
+                        items.push({
+                            id: eid,
+                            tag: tag,
+                            role: role,
+                            text: txt.slice(0, 100),
+                            placeholder: placeholder,
+                            name: name,
+                            aria_label: ariaLabel,
+                            type: type,
+                        });
+                        if (items.length >= 60) break;
+                    }
+                    return items;
+                }"""
+            )
+        except Exception as exc:
+            logger.debug("Structured element extraction fallback: %s", exc)
+
+        # Update element registry
+        self._element_registry = {item["id"]: item for item in structured_elements if "id" in item}
+
         interactive = await self.get_interactive_elements()
         tables = await self.extract_tables()
 
@@ -382,6 +506,7 @@ class BrowserService:
             "url": url,
             "title": title,
             "text_snippet": text[:1200] if text else "",
+            "elements": structured_elements,
             "interactive": interactive,
             "tables_count": len(tables),
             "tables": tables[:3],
@@ -391,7 +516,7 @@ class BrowserService:
 
     async def click_element(self, description: str, element_type: Optional[str] = None) -> bool:
         """
-        Click an element identified by fuzzy text or semantic role.
+        Click an element identified by temporary element_id (e.g. elem_1) or fuzzy semantic text.
         Supports changing button text, synonyms, and dynamic layouts.
         """
         self._require_page()
@@ -399,6 +524,18 @@ class BrowserService:
             return False
 
         desc = description.strip()
+
+        # 0. Check if description is a temporary element_id (e.g. elem_1, elem_14)
+        if re.match(r"^elem_\d+$", desc):
+            try:
+                loc = self._page.locator(f"[data-agent-id='{desc}']")
+                if await loc.count() > 0:
+                    await loc.first.click()
+                    await self._page.wait_for_load_state("domcontentloaded")
+                    return True
+            except Exception as eid_err:
+                logger.debug("Direct click by element_id '%s' failed: %s", desc, eid_err)
+
         pattern = re.compile(re.escape(desc), re.IGNORECASE)
 
         # Synonym map for student portal actions
@@ -450,23 +587,35 @@ class BrowserService:
         return False
 
     async def fill_field(self, label_or_placeholder: str, value: str) -> bool:
-        """Fill a form field identified by label text or placeholder."""
+        """Fill a form field identified by temporary element_id, label text, or placeholder."""
         self._require_page()
         if not label_or_placeholder:
             return False
 
+        target = label_or_placeholder.strip()
+
+        # 0. Check if target is a temporary element_id (e.g. elem_2)
+        if re.match(r"^elem_\d+$", target):
+            try:
+                loc = self._page.locator(f"[data-agent-id='{target}']")
+                if await loc.count() > 0:
+                    await loc.first.fill(value)
+                    return True
+            except Exception as eid_err:
+                logger.debug("Direct fill by element_id '%s' failed: %s", target, eid_err)
+
         try:
-            field = self._page.get_by_label(re.compile(re.escape(label_or_placeholder), re.I))
+            field = self._page.get_by_label(re.compile(re.escape(target), re.I))
             if await field.count() > 0:
                 await field.first.fill(value)
                 return True
 
-            field = self._page.get_by_placeholder(re.compile(re.escape(label_or_placeholder), re.I))
+            field = self._page.get_by_placeholder(re.compile(re.escape(target), re.I))
             if await field.count() > 0:
                 await field.first.fill(value)
                 return True
         except Exception as exc:
-            logger.warning("fill_field failed for '%s': %s", label_or_placeholder, exc)
+            logger.warning("fill_field failed for '%s': %s", target, exc)
 
         return False
 

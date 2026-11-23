@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ from services.security_service import SecurityService
 from services.approval_service import ApprovalService
 from services.report_service import ReportService
 from utils.action_logger import log_action, read_logs
-from schemas.agent_schema import TaskPlan, StepActionDecision
+from schemas.agent_schema import TaskPlan, StepActionDecision, SubGoal
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +377,62 @@ class TaskManager:
         events.append(event)
         _update_run(run_id, updated_at=event["timestamp"])
 
+    def _initialize_subgoals(self, plan: TaskPlan, task_request: str) -> list[SubGoal]:
+        """Initialize structured milestone checklist for multi-goal tracking (Issue D)."""
+        if plan.subgoals:
+            return [sg if isinstance(sg, SubGoal) else SubGoal(**sg) for sg in plan.subgoals]
+
+        lower_req = task_request.lower()
+        subgoals: list[SubGoal] = []
+
+        # Multi-goal: "Pay ... and download ..."
+        if ("pay" in lower_req or "fee" in lower_req) and ("download" in lower_req or "ticket" in lower_req or "admit" in lower_req):
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Locate examination fee section", required=True),
+                SubGoal(id="subgoal_2", description="Identify exact amount and purpose", required=True),
+                SubGoal(id="subgoal_3", description="Obtain approval for payment", required=True),
+                SubGoal(id="subgoal_4", description="Complete payment only after approval", required=True),
+                SubGoal(id="subgoal_5", description="Verify payment confirmation receipt", required=True),
+                SubGoal(id="subgoal_6", description="Locate hall ticket section", required=True),
+                SubGoal(id="subgoal_7", description="Download hall ticket", required=True),
+                SubGoal(id="subgoal_8", description="Verify actual downloaded file on disk", required=True),
+            ]
+        elif "download" in lower_req or "ticket" in lower_req or "invoice" in lower_req or "pdf" in lower_req:
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Navigate to examination or document section", required=True),
+                SubGoal(id="subgoal_2", description="Initiate file download", required=True),
+                SubGoal(id="subgoal_3", description="Verify nonzero file saved on disk", required=True),
+            ]
+        elif "register" in lower_req or "enroll" in lower_req:
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Locate course registration section", required=True),
+                SubGoal(id="subgoal_2", description="Select requested course", required=True),
+                SubGoal(id="subgoal_3", description="Obtain confirmation if irreversible", required=True),
+                SubGoal(id="subgoal_4", description="Verify registration confirmation code appears", required=True),
+            ]
+        elif "leave" in lower_req:
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Open leave application form", required=True),
+                SubGoal(id="subgoal_2", description="Fill leave application details", required=True),
+                SubGoal(id="subgoal_3", description="Submit and verify application reference ID", required=True),
+            ]
+        elif "attendance" in lower_req:
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Navigate to attendance section", required=True),
+                SubGoal(id="subgoal_2", description="Extract attendance percentage records", required=True),
+            ]
+        elif "timetable" in lower_req:
+            subgoals = [
+                SubGoal(id="subgoal_1", description="Navigate to timetable schedule", required=True),
+                SubGoal(id="subgoal_2", description="Extract timetable data", required=True),
+            ]
+        else:
+            steps = plan.steps or ["Navigate to target", "Perform operation", "Verify outcome"]
+            for idx, s in enumerate(steps, 1):
+                subgoals.append(SubGoal(id=f"subgoal_{idx}", description=s, required=True))
+
+        return subgoals
+
     async def _run_workflow(
         self, run_id: str, run: dict[str, Any], browser: BrowserService
     ) -> None:
@@ -409,16 +466,19 @@ class TaskManager:
                 await self._report.submit(run_id, task_id, "not_done", f"NLU planning failed: {exc}")
             return
 
+        subgoals = self._initialize_subgoals(plan, task_request)
+        plan.subgoals = subgoals
         _update_run(run_id, plan=plan.model_dump())
         next_step(
             "llm_plan_received",
             value=plan.intent,
-            reason=f"Goal: {plan.goal} | Constraints: {', '.join(plan.constraints) or 'none'}",
+            reason=f"Goal: {plan.goal} | Subgoals: {len(subgoals)} | Constraints: {', '.join(plan.constraints) or 'none'}",
         )
         self._emit_event(run_id, "plan_created", f"Plan Created: {plan.intent}", {
             "intent": plan.intent,
             "goal": plan.goal,
             "steps": plan.steps,
+            "subgoals": [sg.model_dump() for sg in subgoals],
             "constraints": plan.constraints,
         })
 
@@ -444,12 +504,22 @@ class TaskManager:
             if shot:
                 _update_run(run_id, latest_screenshot_path=shot)
         except Exception as nav_exc:
-            logger.warning("Browser navigation notice for %s: %s", portal_url, nav_exc)
-            self._emit_event(run_id, "navigation_note", f"Navigation note for {portal_url}", {
-                "note": str(nav_exc)
-            })
+            logger.error("Initial browser navigation failed for %s: %s", portal_url, nav_exc)
+            summary = f"Could not reach {portal_url}: {nav_exc}"
+            _update_run(
+                run_id,
+                status="failed",
+                error=f"Navigation failed: {nav_exc}",
+                result_status="not_done",
+                result_summary=summary,
+            )
+            self._emit_event(run_id, "error", "Navigation Failed", {"url": portal_url, "error": str(nav_exc)})
+            log_action(run_id, step, "navigation_failed", target=portal_url, reason=str(nav_exc))
+            if task_id and not str(task_id).startswith("cp_"):
+                await self._report.submit(run_id, task_id, "not_done", summary)
+            return
 
-        # Login if credentials provided
+        # Login if credentials provided (Public websites work without credentials)
         if username and password:
             next_step("browser_login", url=portal_url, reason="Injecting credentials into portal DOM")
             self._emit_event(run_id, "login_attempt", f"Authenticating as {username}", {"user": username})
@@ -467,8 +537,19 @@ class TaskManager:
                 pass
 
             if not login_ok:
-                next_step("login_note", reason="Could not auto-submit login or credentials rejected", result="note")
-                self._emit_event(run_id, "login_result", "Login form note", {"success": False})
+                next_step("login_failed", reason="Authentication failed: invalid credentials or login form could not be submitted", result="error")
+                self._emit_event(run_id, "error", "Authentication Failed", {"success": False, "user": username})
+                summary = "Authentication failed: invalid credentials or portal login form could not be submitted."
+                _update_run(
+                    run_id,
+                    status="failed",
+                    result_status="not_done",
+                    error=summary,
+                    result_summary=summary,
+                )
+                if task_id and not str(task_id).startswith("cp_"):
+                    await self._report.submit(run_id, task_id, "not_done", summary)
+                return
             else:
                 next_step("login_success", reason="Authenticated into student portal dashboard")
                 self._emit_event(run_id, "login_result", "Authentication successful", {"success": True})
@@ -589,13 +670,23 @@ class TaskManager:
                 })
                 continue
 
-            # E. IRREVERSIBLE ACTIONS GATE: Human In The Loop (Issue 6)
-            if decision.is_irreversible or self._approval.is_irreversible(decision.action_type):
-                action_desc = f"Execute '{decision.action_type}' for task: {plan.goal}"
+            # Evaluate click targets, not only action names (Section E)
+            target_str = str(decision.target_element or "").lower()
+            is_target_sensitive = any(term in target_str for term in [
+                "pay", "fee", "payment", "enroll", "register", "delete", "cancel", "drop", "submit"
+            ])
+            requires_human_approval = decision.is_irreversible or self._approval.is_irreversible(decision.action_type) or (
+                decision.action_type in {"click", "submit_form"} and is_target_sensitive
+            )
+
+            # E. IRREVERSIBLE ACTIONS GATE: Human In The Loop (Issue 6 & Section E)
+            user_approved = False
+            if requires_human_approval:
+                action_desc = f"Execute '{decision.action_type}' ({decision.target_element or ''}) for task: {plan.goal}"
                 next_step(
                     "confirmation_requested",
                     target=decision.action_type,
-                    reason=f"Irreversible action '{decision.action_type}' requires human confirmation",
+                    reason=f"Irreversible action '{decision.action_type}' ({decision.target_element or ''}) requires human confirmation",
                 )
 
                 # Set awaiting_approval and notify frontend workspace
@@ -618,9 +709,9 @@ class TaskManager:
                     "reason": decision.reasoning,
                 })
 
-                # Check if action was pre-approved or wait for in-session UI approval
-                user_pre_approved = run.get("user_approved", False) or run.get("_approval_decision") is True
-                if not user_pre_approved:
+                # Check if this specific action was approved or wait for in-session UI approval (Section E)
+                action_approved = run.get("_approval_decision") is True
+                if not action_approved:
                     approval_event: asyncio.Event = run.setdefault("_approval_event", asyncio.Event())
                     approval_event.clear()
                     run["_approval_decision"] = None
@@ -629,13 +720,11 @@ class TaskManager:
                     logger.info("Task %s paused awaiting approval for action: %s", run_id, decision.action_type)
                     await approval_event.wait()
 
-                    user_approved = bool(run.get("_approval_decision", False))
-                else:
-                    user_approved = True
+                    action_approved = bool(run.get("_approval_decision", False))
 
                 _update_run(run_id, pending_approval=None)
 
-                if not user_approved:
+                if not action_approved:
                     summary = f"Irreversible action '{decision.action_type}' was denied by user."
                     next_step("confirmation_denied", reason=summary)
                     self._emit_event(run_id, "approval_denied", "Approval Denied by User", {"reason": summary})
@@ -643,6 +732,10 @@ class TaskManager:
                     if task_id and not str(task_id).startswith("cp_"):
                         await self._report.submit(run_id, task_id, "not_done", summary)
                     return
+
+                # Action approved — resume running state and clear decision
+                _update_run(run_id, status="running")
+                run["_approval_decision"] = None
 
                 # If approved, also check official confirm.py if available
                 confirm_result = await self._approval.request_confirmation(
@@ -673,6 +766,36 @@ class TaskManager:
             if shot:
                 _update_run(run_id, latest_screenshot_path=shot)
 
+            # Subgoal checklist progress update (Section D)
+            post_text = (await browser.get_page_text()).lower()
+            for sg in subgoals:
+                if sg.completed:
+                    continue
+                sg_d = sg.description.lower()
+                if "approval" in sg_d and (user_approved or run.get("user_approved")):
+                    sg.completed = True
+                    sg.verification_evidence = "Approval granted"
+                elif "download" in sg_d and run.get("downloaded_files"):
+                    sg.completed = True
+                    sg.verification_evidence = f"Downloaded {len(run['downloaded_files'])} file(s)"
+                elif "file" in sg_d and any(f.get("size_bytes", 0) > 0 for f in run.get("downloaded_files", [])):
+                    sg.completed = True
+                    sg.verification_evidence = "Nonzero file verified on disk"
+                elif ("pay" in sg_d or "fee" in sg_d) and any(term in post_text for term in ["paid", "receipt", "successful", "transaction"]):
+                    sg.completed = True
+                    sg.verification_evidence = "Payment confirmation observed"
+                elif ("register" in sg_d or "enroll" in sg_d) and any(term in post_text for term in ["enrolled", "registered", "conf-"]):
+                    sg.completed = True
+                    sg.verification_evidence = "Registration confirmation observed"
+
+            if decision.subgoal_id_completed:
+                for sg in subgoals:
+                    if sg.id == decision.subgoal_id_completed:
+                        sg.completed = True
+                        sg.verification_evidence = f"Action '{act_type}' completed"
+
+            _update_run(run_id, subgoals=[sg.model_dump() for sg in subgoals])
+
             # G. VERIFY: State verification
             next_step(
                 f"verify_action_{act_type}",
@@ -684,11 +807,28 @@ class TaskManager:
                 "target": target,
                 "success": act_success,
                 "result": "success" if act_success else "failed",
+                "subgoals": [sg.model_dump() for sg in subgoals],
             })
 
+            # Multi-goal tracking: verify all subgoals before allowing completion (Issue D)
             if decision.is_task_complete or act_type in {"report"}:
-                is_completed = True
-                break
+                uncompleted_required = [sg for sg in subgoals if sg.required and not sg.completed]
+                if uncompleted_required:
+                    logger.info("Task completion postponed: unverified subgoals remain: %s", [sg.id for sg in uncompleted_required])
+                    self._emit_event(
+                        run_id,
+                        "subgoal_pending",
+                        f"Subgoals Pending ({len(uncompleted_required)} remaining)",
+                        {"pending": [sg.description for sg in uncompleted_required]},
+                    )
+                    actions_history.append({
+                        "step": step,
+                        "action": "subgoals_pending_warning",
+                        "reason": f"Required subgoals still incomplete: {', '.join(sg.description for sg in uncompleted_required)}. Do not finish yet.",
+                    })
+                else:
+                    is_completed = True
+                    break
 
         # ── 4. Final Verification & Outcome Reporting (Issue 5) ───────────────
         next_step("final_verification", reason="Verifying portal state and outcomes against student goal")
@@ -802,6 +942,25 @@ class TaskManager:
         lower_text = final_text.lower()
         lower_request = task_request.lower()
 
+        # 0. Compound multi-goal verification (e.g. pay fee AND download hall ticket - Issue D)
+        if ("pay" in lower_request or "fee" in lower_request) and ("download" in lower_request or "ticket" in lower_request or "admit" in lower_request):
+            valid_file = next(
+                (f for f in downloaded_files if f.get("size_bytes", 0) > 0 and (not f.get("path") or os.path.exists(f["path"]))),
+                None
+            )
+            payment_confirmations = [
+                "payment successful", "transaction successful", "receipt generated",
+                "payment confirmed", "payment id", "transaction id", "paid successfully"
+            ]
+            has_payment = any(term in lower_text for term in payment_confirmations)
+            if valid_file and has_payment:
+                fname = valid_file.get("filename") or valid_file.get("name") or os.path.basename(valid_file.get("path", "file"))
+                return True, f"Multi-goal task completed and verified: Payment confirmed and file '{fname}' ({valid_file.get('size_bytes', 0)} bytes) downloaded."
+            elif not has_payment:
+                return False, "Multi-goal verification failed: Payment was not confirmed on portal."
+            else:
+                return False, "Multi-goal verification failed: Hall ticket file was not downloaded to disk."
+
         # 1. Download verification (hall ticket, invoice, PDF, etc.)
         is_download_intent = (
             intent == "download_hall_ticket"
@@ -829,15 +988,22 @@ class TaskManager:
                 return True, "Payment confirmed: Transaction receipt/confirmation detected."
             return False, "Payment verification failed: No confirmation receipt or transaction ID was observed on the page."
 
-        # 3. Elective registration verification
-        if intent == "register_elective" or ("register" in lower_request and "elective" in lower_request):
-            # Check if specific course code/title or enrollment success is visible
-            elective_terms = ["enrolled", "registered", "elective added", "registration confirmed", "course registered"]
-            if any(term in lower_text for term in elective_terms):
+        # 3. Elective registration verification (Section H: exact course code verification)
+        if intent == "register_elective" or ("register" in lower_request and "elective" in lower_request) or "enroll" in lower_request:
+            elective_terms = ["enrolled", "registered", "elective added", "registration confirmed", "course registered", "conf-", "success"]
+            has_confirm_keyword = any(term in lower_text for term in elective_terms)
+
+            # Try to match course code (e.g. OE162, CS101, etc.)
+            course_match = re.search(r"\b([A-Z]{2,4}\s*\d{3,4})\b", f"{task_request} {goal}", re.I)
+            req_course = course_match.group(1).replace(" ", "").upper() if course_match else ""
+
+            if req_course:
+                if req_course in final_text.upper() and has_confirm_keyword:
+                    return True, f"Elective registration confirmed: Course '{req_course}' appears in verified portal records."
+                return False, f"Elective registration verification failed: Enrollment confirmation for '{req_course}' not found in portal."
+
+            if has_confirm_keyword:
                 return True, "Elective registration confirmed: Course appears in enrolled/registered courses."
-            # Check if button was clicked successfully
-            if any("register" in h.get("action", "") and h.get("result") == "success" for h in actions_history):
-                return True, "Elective registration submitted successfully."
             return False, "Elective registration verification failed: Enrollment confirmation not found in portal."
 
         # 4. Leave submission verification
