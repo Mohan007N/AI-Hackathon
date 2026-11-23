@@ -256,7 +256,7 @@ function App() {
       setLogs(readArray(logsKey(user.email)))
       setApprovals(readArray(approvalsKey(user.email)))
       setSelectedId(null)
-      setView(savedRecords.length ? 'records' : 'console')
+      setView('console')
     } else {
       sessionStorage.removeItem(SESSION_KEY)
       setRecords([]); setLogs([]); setApprovals([]); setSelectedId(null)
