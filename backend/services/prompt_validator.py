@@ -187,8 +187,20 @@ class PromptValidator:
 
         if ml_status == "blocked":
             return PromptValidationResult(
+                status="malicious",
+                reason=f"Rules passed but ML classifier flagged prompt as malicious ({ml_result.get('ml_label')}, confidence: {ml_result.get('ml_confidence')}).",
+                confidence=ml_result.get("ml_confidence"),
+                rule_based=rule_result.rule_based,
+                ml_classifier=ml_status,
+                matched_rules=rule_result.matched_rules,
+                ml_label=ml_result.get("ml_label"),
+                ml_confidence=ml_result.get("ml_confidence"),
+            )
+
+        if ml_status == "review":
+            return PromptValidationResult(
                 status="uncertain",
-                reason="Rules passed but ML classifier flagged the prompt.",
+                reason=f"ML classifier flagged prompt for review ({ml_result.get('ml_label')}, confidence: {ml_result.get('ml_confidence')}).",
                 confidence=ml_result.get("ml_confidence"),
                 rule_based=rule_result.rule_based,
                 ml_classifier=ml_status,

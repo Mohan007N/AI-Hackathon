@@ -21,17 +21,29 @@ class SecurityConfig:
     # The organizer-provided portal URL is the single source of truth.
     # Additional trusted domains can be added via env var (comma-separated).
     PORTAL_URL: str = settings.PORTAL_URL
-    TRUSTED_DOMAINS: list[str] = []
+    TRUSTED_DOMAINS: list[str] = [
+        "college-portal.example.com",
+    ]
 
     @classmethod
     def get_trusted_domains(cls) -> list[str]:
         """Return list of trusted domains derived from PORTAL_URL and env."""
         domains = list(cls.TRUSTED_DOMAINS)
-        # Always trust the organizer portal domain
-        if cls.PORTAL_URL:
-            parsed = urlparse(cls.PORTAL_URL)
-            if parsed.hostname:
-                domains.append(parsed.hostname.lower())
+
+        # Check current env and settings for portal URL dynamically
+        for portal_cand in [
+            os.getenv("PORTAL_URL", ""),
+            getattr(settings, "PORTAL_URL", ""),
+            cls.PORTAL_URL,
+        ]:
+            if portal_cand:
+                try:
+                    parsed = urlparse(portal_cand)
+                    if parsed.hostname:
+                        domains.append(parsed.hostname.lower())
+                except Exception:
+                    pass
+
         # Additional trusted domains from env (comma-separated)
         extra = os.getenv("TRUSTED_DOMAINS", "")
         if extra:

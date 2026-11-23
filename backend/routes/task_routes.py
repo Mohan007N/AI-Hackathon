@@ -20,27 +20,95 @@ from schemas.task_schema import (
 )
 from services.portal_service import PortalService, PortalServiceError
 from services.task_manager import TaskManager, get_run
+from services.security_service import SecurityService
+from utils.action_logger import log_action
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/task", tags=["Tasks"])
 
 _portal = PortalService()
 _manager = TaskManager()
+_security = SecurityService()
 
 
 @router.post(
     "/start",
     response_model=TaskStartResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Start a new organizer task run",
+    summary="Start a new organizer task run with pre-execution security validation",
 )
 async def start_task(body: TaskStartRequest):
     """
-    Calls the organizer portal to create a new run, then fetches the task request.
-    Returns the run_id required for all subsequent calls.
+    Executes the 12-step pre-execution security workflow:
+      STEP 1: Receive website_url, username, password, user_prompt, task_id.
+      STEP 2: Validate input presence and format.
+      STEP 3: Validate website URL and trusted organizer domain.
+      STEP 4: Validate credential presence and format (credentials never logged/returned).
+      STEP 5: Run prompt security rules.
+      STEP 6: Run Logistic Regression prediction.
+      STEP 7: Combine security decisions.
+      STEP 8: If BLOCKED, stop execution and reject request.
+      STEP 9: If REVIEW, request clarification without starting browser execution.
+      STEP 10: If SAFE, proceed to official organizer portal integration.
+      STEP 11: Start or retrieve the official organizer run using portal service.
+      STEP 12: Pass authorized task & validated context to browser service.
     """
+    validation_info = None
+
+    # If student provided inputs (URL, username, password, user_prompt)
+    if body.website_url or body.user_prompt or body.username or body.password:
+        url_to_check = body.website_url or ""
+        user_to_check = body.username or ""
+        pass_to_check = body.password or ""
+        prompt_to_check = body.user_prompt or ""
+
+        validation = _security.validate_pre_execution(
+            website_url=url_to_check,
+            username=user_to_check,
+            password=pass_to_check,
+            user_prompt=prompt_to_check,
+        )
+
+        validation_info = validation
+
+        # Log security validation event (NO CREDENTIALS)
+        log_action(
+            run_id=body.task_id or "pre_task_start",
+            step=0,
+            action="task_start_security_validation",
+            target=url_to_check,
+            reason=f"overall={validation['overall_status']}",
+            result=validation["overall_status"],
+        )
+
+        # STEP 8 & 9: If BLOCKED or REVIEW, stop execution
+        if not validation["allowed_to_proceed"]:
+            reason = (
+                validation["prompt_validation"].get("reason")
+                or validation["website_validation"].get("reason")
+                or validation["credential_validation"].get("reason")
+                or f"Task rejected by security policy ({validation['overall_status']})"
+            )
+            logger.warning(
+                "Task start blocked by security: status=%s, reason=%s",
+                validation["overall_status"],
+                reason,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Task start {validation['overall_status']}: {reason}",
+            )
+
+    # STEP 10 & 11: Call organizer portal to start the run
     try:
-        result = await _manager.start_task_run(body.task_id)
+        result = await _manager.start_task_run(
+            task_id=body.task_id,
+            website_url=body.website_url,
+            username=body.username,
+            password=body.password,
+            user_prompt=body.user_prompt,
+            security_validation=validation_info,
+        )
         return TaskStartResponse(**result)
     except PortalServiceError as exc:
         logger.error("Portal error on task start: %s", exc)

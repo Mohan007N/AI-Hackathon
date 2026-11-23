@@ -196,7 +196,8 @@ class URLValidator:
 
     def _is_trusted_domain(self, hostname: str) -> bool:
         """Check if hostname matches or is a subdomain of a trusted domain."""
-        for td in self._trusted:
+        trusted_domains = [d.lower() for d in SecurityConfig.get_trusted_domains()]
+        for td in trusted_domains:
             if hostname == td or hostname.endswith("." + td):
                 return True
         return False

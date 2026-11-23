@@ -21,10 +21,10 @@ from schemas.security_schema import (
     SecurityChecksResult,
     TaskStartWithInputsRequest,
     TaskStartWithValidationResponse,
+    PredictRequest,
+    PredictResponse,
 )
-from services.url_validator import URLValidator
-from services.credential_validator import CredentialValidator
-from services.prompt_validator import PromptValidator
+from services.security_service import SecurityService
 from services.portal_service import PortalService, PortalServiceError
 from services.task_manager import TaskManager
 from utils.action_logger import log_action
@@ -34,9 +34,7 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/security", tags=["Security"])
 
-_url_validator = URLValidator()
-_cred_validator = CredentialValidator()
-_prompt_validator = PromptValidator()
+_security = SecurityService()
 _portal = PortalService()
 _manager = TaskManager()
 
@@ -51,52 +49,20 @@ def _run_validation(
     Core validation logic shared by /api/security/validate and /api/task/start.
     Returns the full SecurityValidateResponse.
     """
-    # ── Step 1: URL ──────────────────────────────────────────────────────────
-    url_result = _url_validator.validate(website_url)
-
-    # ── Step 2: Credentials ──────────────────────────────────────────────────
-    cred_result = _cred_validator.validate(username, password)
-
-    # ── Step 3: Prompt ───────────────────────────────────────────────────────
-    prompt_result = _prompt_validator.validate(user_prompt)
-
-    # ── Step 4: Combine decision ─────────────────────────────────────────────
-    # Priority: blocked > review > safe
-    statuses = [url_result.status, prompt_result.status]
-    if cred_result.status == "invalid":
-        statuses.append("blocked")
-
-    if "blocked" in statuses or prompt_result.status == "malicious":
-        overall = "blocked"
-    elif "review" in statuses or prompt_result.status == "uncertain":
-        overall = "review"
-    else:
-        overall = "safe"
-
-    allowed = overall == "safe"
+    raw = _security.validate_pre_execution(
+        website_url=website_url,
+        username=username,
+        password=password,
+        user_prompt=user_prompt,
+    )
 
     return SecurityValidateResponse(
-        overall_status=overall,
-        allowed_to_proceed=allowed,
-        website_validation=WebsiteValidationResult(
-            status=url_result.status,
-            reason=url_result.reason,
-            domain=url_result.domain,
-            is_trusted=url_result.is_trusted,
-        ),
-        credential_validation=CredValResult(
-            status=cred_result.status,
-            reason=cred_result.reason if cred_result.status == "invalid" else None,
-        ),
-        prompt_validation=PromptValidationResultSchema(
-            status=prompt_result.status,
-            reason=prompt_result.reason,
-            confidence=prompt_result.confidence,
-        ),
-        security_checks=SecurityChecksResult(
-            rule_based=prompt_result.rule_based,
-            ml_classifier=prompt_result.ml_classifier,
-        ),
+        overall_status=raw["overall_status"],
+        allowed_to_proceed=raw["allowed_to_proceed"],
+        website_validation=WebsiteValidationResult(**raw["website_validation"]),
+        credential_validation=CredValResult(**raw["credential_validation"]),
+        prompt_validation=PromptValidationResultSchema(**raw["prompt_validation"]),
+        security_checks=SecurityChecksResult(**raw["security_checks"]),
     )
 
 
@@ -130,6 +96,31 @@ async def validate_security(body: SecurityValidateRequest):
     )
 
     return result
+
+
+# ── Standalone ML Predict Endpoint ───────────────────────────────────────────
+
+@router.post(
+    "/predict",
+    response_model=PredictResponse,
+    summary="Predict prompt safety using trained ML classifier",
+    description="Returns risk classification (legitimate, malicious, uncertain), confidence score, and class probabilities.",
+)
+async def predict_prompt_security(body: PredictRequest):
+    predictor = _security._get_predictor()
+    if not predictor or not predictor.is_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Trained ML model artifacts not found. Run python ml/train_classifier.py first.",
+        )
+    result = predictor.predict(body.text)
+    return PredictResponse(
+        text=body.text,
+        label=result.get("label", "uncertain"),
+        confidence=result.get("confidence", 0.0),
+        model=result.get("model", "logistic_regression"),
+        probabilities=result.get("probabilities", {}),
+    )
 
 
 # ── Extended task start with pre-validation ──────────────────────────────────

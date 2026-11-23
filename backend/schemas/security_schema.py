@@ -128,3 +128,26 @@ class TaskStartWithValidationResponse(BaseModel):
     message: str
     started_at: Optional[datetime] = None
 
+
+# ── ML Predict Schemas ──────────────────────────────────────────────────────
+
+class PredictRequest(BaseModel):
+    text: str = Field(..., description="Prompt or webpage text to classify for prompt security risk")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": "Check my attendance for this semester"
+            }
+        }
+    }
+
+
+class PredictResponse(BaseModel):
+    text: str
+    label: str               # "legitimate" | "malicious" | "uncertain"
+    confidence: float
+    model: str = "logistic_regression"
+    probabilities: dict[str, float] = Field(default_factory=dict)
+    timestamp: datetime = Field(default_factory=datetime.now)
+

@@ -12,9 +12,23 @@ from pydantic import BaseModel, Field
 # ── Request Models ──────────────────────────────────────────────────────────
 
 class TaskStartRequest(BaseModel):
-    task_id: str = Field(..., description="Organizer-assigned task identifier, e.g. 'p01'")
+    task_id: str = Field("p01", description="Organizer-assigned task identifier, e.g. 'p01'")
+    website_url: Optional[str] = Field(None, description="College portal website URL (e.g. https://college-portal.example.com)")
+    username: Optional[str] = Field(None, description="College student username (never returned in responses or logged)")
+    password: Optional[str] = Field(None, description="College student password (never returned in responses or logged)")
+    user_prompt: Optional[str] = Field(None, description="Student's natural-language task prompt")
 
-    model_config = {"json_schema_extra": {"example": {"task_id": "p01"}}}
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "task_id": "p01",
+                "website_url": "https://college-portal.example.com",
+                "username": "student123",
+                "password": "example-password",
+                "user_prompt": "Check my attendance and download my hall ticket",
+            }
+        }
+    }
 
 
 # ── Response Models ─────────────────────────────────────────────────────────
@@ -28,11 +42,13 @@ class TaskInfo(BaseModel):
 
 
 class TaskStartResponse(BaseModel):
-    run_id: str
+    run_id: Optional[str] = None
     task_id: str
     portal_url: Optional[str] = None
     request_text: Optional[str] = None
-    status: str = "started"
+    status: str = "started"  # "started" | "blocked" | "review"
+    message: Optional[str] = None
+    security_validation: Optional[dict[str, Any]] = None
     started_at: datetime = Field(default_factory=datetime.now)
 
 

@@ -46,9 +46,10 @@ SECURITY_RULES: list[SecurityRule] = [
         description="Webpage instructs the agent to ignore its original task or system prompt.",
         severity=RuleSeverity.CRITICAL,
         patterns=_compile([
-            r"ignore\s+(your\s+)?(previous|original|above|prior|all)\s+(instructions?|prompt|task|commands?)",
-            r"disregard\s+(all\s+)?(previous|prior|original)\s+(instructions?|task)",
+            r"ignore\s+(your\s+)?(previous|original|above|prior|all|security)\s+(instructions?|prompt|task|commands?|rules?|policies|policy|guidelines?|constraints?)",
+            r"disregard\s+(all\s+)?(previous|prior|original)\s+(instructions?|task|rules?|policies)",
             r"forget\s+(everything|all|your\s+instructions?|the\s+task)",
+            r"bypass\s+(all\s+)?(security|rules?|filters?|restrictions?|checks?)",
             r"new\s+(system\s+)?prompt[:\s]",
             r"\[system\]",
             r"you are now",
@@ -62,7 +63,7 @@ SECURITY_RULES: list[SecurityRule] = [
         description="Webpage requests the agent to reveal passwords, OTPs, tokens or credentials.",
         severity=RuleSeverity.CRITICAL,
         patterns=_compile([
-            r"(reveal|send|output|print|show|display|expose|leak|give|tell)\b.{0,30}\b(password|otp|token|secret|credentials?|api[\s_-]?key)",
+            r"(reveal|send|output|print|show|display|expose|leak|give|tell|steal|dump|harvest|exfiltrate|extract|export)\b.{0,30}\b(password|otp|token|secret|credentials?|api[\s_-]?key)",
             r"what\s+is\s+(the\s+)?(admin\s+|root\s+|student\s+)?(password|otp|token|secret)",
             r"(type|enter|fill)\s+(the\s+)?(password|otp)\s+(into|in|at)\s+(this|the|our|external)",
             r"send\s+credentials?\s+to",

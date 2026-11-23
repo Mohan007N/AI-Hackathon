@@ -52,7 +52,15 @@ class TaskManager:
 
     # ── Phase 1: Start run ────────────────────────────────────────────────────
 
-    async def start_task_run(self, task_id: str) -> dict[str, Any]:
+    async def start_task_run(
+        self,
+        task_id: str,
+        website_url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+        security_validation: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         """Call organizer portal to create a new run, then fetch task request."""
         run_data = await self._portal.start_run(task_id)
         run_id: str = run_data.get("run_id") or run_data.get("id", "")
@@ -60,36 +68,40 @@ class TaskManager:
             raise PortalServiceError("Portal did not return a run_id.")
 
         request_data = await self._portal.get_run_request(run_id)
-        portal_url: str = request_data.get("portal_url", "")
-        task_request: str = request_data.get("task_request", "")
+        effective_portal_url: str = website_url or request_data.get("portal_url", "")
+        effective_task_request: str = user_prompt or request_data.get("task_request", "")
+        effective_username: str = username or request_data.get("username", "")
+        effective_password: str = password or request_data.get("password", "")
 
         _set_run(run_id, {
             "run_id": run_id,
             "task_id": task_id,
-            "portal_url": portal_url,
-            # credentials stored in-memory, never logged or sent to LLM
-            "_username": request_data.get("username", ""),
-            "_password": request_data.get("password", ""),
-            "task_request": task_request,
+            "portal_url": effective_portal_url,
+            # credentials stored in-memory only, never logged or sent to LLM/ML
+            "_username": effective_username,
+            "_password": effective_password,
+            "task_request": effective_task_request,
             "status": "started",
             "step": 0,
             "current_action": None,
             "error": None,
             "result_status": None,
             "result_summary": None,
+            "security_validation": security_validation,
             "started_at": datetime.now(tz=timezone.utc).isoformat(),
         })
 
         log_action(run_id, 0, "run_started",
                    target=task_id,
-                   reason="Organizer run created successfully")
+                   reason="Organizer run created successfully after security checks")
 
         return {
             "run_id": run_id,
             "task_id": task_id,
-            "portal_url": portal_url,
-            "request_text": task_request,
+            "portal_url": effective_portal_url,
+            "request_text": effective_task_request,
             "status": "started",
+            "security_validation": security_validation,
         }
 
     # ── Phase 2: Execute agent workflow ───────────────────────────────────────
