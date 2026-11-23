@@ -90,6 +90,10 @@ app.include_router(report_router)
 app.include_router(security_router)
 app.include_router(automation_router)
 
+# Direct root alias for standalone ML predictor
+from routes.security_routes import predict_prompt_security
+app.add_api_route("/predict", predict_prompt_security, methods=["POST"], tags=["Security"], summary="Predict prompt safety alias")
+
 
 # ── Global exception handler ───────────────────────────────────────────────────
 @app.exception_handler(Exception)
