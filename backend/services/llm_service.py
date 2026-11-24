@@ -55,7 +55,7 @@ Output JSON Schema:
 # System prompt for dynamic next-action reasoning in the agent loop
 _REASONER_SYSTEM_PROMPT = """
 You are the reasoning engine of a Safe Web Interactive Agent navigating a college portal or web service.
-Based on the student's goal, the current page observation (including observed elements with temporary IDs like elem_1), and past actions, determine the single next safe action.
+Based on the student's goal, the current page observation (including observed elements with temporary IDs like elem_1), subgoals status, and past actions, determine the single next safe action.
 
 STRICT RULES:
 1. Output ONLY valid JSON matching the schema below.
@@ -65,7 +65,8 @@ STRICT RULES:
 4. NEVER produce code, scripts, or instructions to leak credentials or bypass confirmation.
 5. If the action is irreversible (e.g. pay_fee, register_elective, delete, submit), set is_irreversible: true.
 6. If all required subgoals and the goal have been fully accomplished and verified, set is_task_complete: true and action_type: "report".
-7. If there are multiple subgoals (e.g. pay fee then download), complete them in strict sequence.
+7. CRITICAL PAYMENT RULE: If page text contains payment confirmation, a receipt number, transaction ID, or 'Payment successful' (or if fee payment subgoals are marked [COMPLETED]), the payment is ALREADY DONE. Do NOT click Pay again. Do NOT look for more fees to pay. Set is_task_complete: true and action_type: "report".
+8. If there are multiple subgoals (e.g. pay fee then download), complete them in strict sequence.
 
 Output JSON Schema:
 {
@@ -198,16 +199,29 @@ class LLMService:
         current_page_info: dict[str, Any],
         previous_actions: list[dict[str, Any]],
         *,
+        subgoals: Optional[list[Any]] = None,
         model: Optional[str] = None,
     ) -> StepActionDecision:
         """
-        Decide the single next action based on current DOM observation and past actions.
+        Decide the single next action based on current DOM observation, subgoals, and past actions.
         """
         clean_goal = self._sanitize_prompt(goal)
         clean_request = self._sanitize_prompt(task_request)
 
         if not self._is_live_key(self.api_key):
             return self._deterministic_next_action(clean_goal, current_page_info, previous_actions)
+
+        # Build subgoals status context
+        subgoals_summary = ""
+        if subgoals:
+            sg_lines = []
+            for sg in subgoals:
+                desc = sg.get("description") if isinstance(sg, dict) else getattr(sg, "description", "")
+                completed = sg.get("completed") if isinstance(sg, dict) else getattr(sg, "completed", False)
+                ev = sg.get("verification_evidence") if isinstance(sg, dict) else getattr(sg, "verification_evidence", "")
+                status_str = f"[COMPLETED: {ev}]" if completed else "[PENDING]"
+                sg_lines.append(f"- {desc}: {status_str}")
+            subgoals_summary = "Subgoals Status:\n" + "\n".join(sg_lines) + "\n"
 
         # Build structured previous actions context (Requirement 21)
         history_lines = []
@@ -233,6 +247,7 @@ class LLMService:
             f"Original Request: {clean_request}\n"
             f"Current Page URL: {current_page_info.get('url', '')}\n"
             f"Page Title: {current_page_info.get('title', '')}\n"
+            f"{subgoals_summary}"
             f"Discovered Elements with IDs (use target_element with element ID or text):\n{elem_str}\n"
             f"Tables on Page (rows & columns):\n{tables_json}\n"
             f"Interactive Summary: {json.dumps(current_page_info.get('interactive', {}))[:800]}\n"
@@ -594,6 +609,23 @@ class LLMService:
             return StepActionDecision(
                 action_type="inspect_page",
                 reasoning="Inspect initial page state and available navigational options.",
+            )
+
+        # Check if payment confirmation is already visible on the page
+        text_snippet = (page_info.get("text_snippet") or "").lower()
+        if ("pay" in goal_lower or "fee" in goal_lower) and any(term in text_snippet for term in ["payment successful", "paid successfully", "receipt no", "transaction id", "payment has been confirmed"]):
+            # If compound goal with download and download not done yet, continue to download
+            if ("ticket" in goal_lower or "download" in goal_lower or "admit" in goal_lower) and "download" not in executed_dispatches:
+                match = _find_elem(["download", "hall ticket", "admit card"]) or next((b for b in buttons + links if any(k in b for k in ["download", "hall ticket", "admit card"])), "Download Hall Ticket")
+                return StepActionDecision(
+                    action_type="download",
+                    target_element=match,
+                    reasoning=f"Payment confirmed. Downloading hall ticket via '{match}'",
+                )
+            return StepActionDecision(
+                action_type="report",
+                reasoning="Fee payment has completed successfully with confirmation observed on page.",
+                is_task_complete=True,
             )
 
         # Compound Goal: Fee payment + Download hall ticket (Issue D)

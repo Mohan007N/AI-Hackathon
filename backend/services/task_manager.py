@@ -806,6 +806,7 @@ class TaskManager:
                     task_request=task_request,
                     current_page_info=page_structure,
                     previous_actions=actions_history,
+                    subgoals=[sg.model_dump() for sg in subgoals],
                 )
             except Exception as exc:
                 logger.warning("Reasoning fallback due to: %s", exc)
@@ -889,18 +890,47 @@ class TaskManager:
 
             target_str = (target_raw + " " + target_resolved_text).lower()
             reasoning_str = str(decision.reasoning or "").lower()
-            is_target_sensitive = any(term in target_str or term in reasoning_str for term in [
-                "pay", "fee", "payment", "enroll", "register", "delete", "cancel", "drop"
-            ]) or (decision.action_type == "submit_form" and any(term in reasoning_str for term in ["pay", "fee", "enroll", "register"]))
+
+            # Disallow redundant payment actions if payment is already complete in this run
+            if run.get("_payment_completed") and any(term in target_str or term in reasoning_str for term in ["pay", "fee", "payment"]):
+                logger.info("Payment already completed in this run. Suppressing redundant payment action '%s'.", decision.target_element)
+                uncompleted_required = [sg for sg in subgoals if sg.required and not sg.completed]
+                if not uncompleted_required:
+                    is_completed = True
+                    break
+                else:
+                    continue
+
+            # Navigation clicks: clicking a menu/nav link (e.g. "Fees", "Electives", "Home") just to browse/view is NOT an irreversible action
+            nav_tabs = {"fees", "electives", "home", "attendance", "leave", "messages", "profile", "logout", "timetable", "my timetable"}
+            is_nav_click = (
+                (target_raw.strip().lower() in nav_tabs or target_resolved_text.strip().lower() in nav_tabs)
+                and not any(action_kw in target_str or action_kw in reasoning_str for action_kw in ["confirm payment", "submit payment", "initiate payment", "make payment", "pay now", "pay amount", "drop", "delete", "register course", "enroll course"])
+            )
+
+            is_target_sensitive = not is_nav_click and (
+                any(term in target_str or term in reasoning_str for term in [
+                    "pay", "fee", "payment", "enroll", "register", "delete", "cancel", "drop"
+                ]) or (decision.action_type == "submit_form" and any(term in reasoning_str for term in ["pay", "fee", "enroll", "register"]))
+            )
 
             # Check if this action/target was already approved in this session
-            approved_actions = run.setdefault("_approved_actions", set())
+            raw_approved = run.get("_approved_actions")
+            if isinstance(raw_approved, list):
+                approved_actions = set(raw_approved)
+                run["_approved_actions"] = approved_actions
+            elif isinstance(raw_approved, set):
+                approved_actions = raw_approved
+            else:
+                approved_actions = set()
+                run["_approved_actions"] = approved_actions
+
             action_target_key = f"{decision.action_type.lower()}:{target_str}"
             is_already_approved = (
                 action_target_key in approved_actions
                 or decision.action_type.lower() in approved_actions
                 or target_str in approved_actions
-                or any(term in approved_actions for term in ["drop", "register", "pay", "fee", "submit", "delete", "cancel"] if term in target_str or term in decision.action_type.lower())
+                or any(term in approved_actions for term in ["drop", "register", "pay", "fee", "payment", "submit", "delete", "cancel"] if term in target_str or term in reasoning_str or term in decision.action_type.lower())
             )
 
             # Check if target element exists on page before prompting human approval
@@ -910,19 +940,46 @@ class TaskManager:
             )
             if decision.action_type == "click" and not is_semantic_irreversible_type:
                 target_cand = target_raw.strip().lower()
-                has_in_elements = any(
-                    target_cand == (el.get("id", "") or "").lower()
-                    or target_cand in (el.get("text", "") or "").lower()
-                    or target_cand in (el.get("name", "") or "").lower()
-                    or target_cand in (el.get("placeholder", "") or "").lower()
-                    or any(part in (el.get("text", "") or "").lower() for part in target_cand.split() if len(part) >= 3)
-                    for el in page_structure.get("elements", [])
-                )
+                has_in_elements = False
+                for el in page_structure.get("elements", []):
+                    el_id = (el.get("id") or "").lower()
+                    el_text = (el.get("text") or "").lower()
+                    el_name = (el.get("name") or "").lower()
+                    role = (el.get("role") or "").lower()
+
+                    if target_cand in {el_id, el_name}:
+                        has_in_elements = True
+                        break
+
+                    is_nav_link = role == "link" and el_text in nav_tabs
+                    is_action_target = any(act_word in target_cand for act_word in ["pay", "drop", "delete", "register", "submit", "confirm", "proceed"])
+                    if is_nav_link and is_action_target and target_cand != el_text:
+                        continue
+
+                    if el_text:
+                        if target_cand == el_text or target_cand in el_text:
+                            has_in_elements = True
+                            break
+                        if len(el_text) >= 4 and el_text in target_cand:
+                            has_in_elements = True
+                            break
+
                 inter = page_structure.get("interactive", {})
-                has_in_interactive = any(
-                    target_cand in b.lower() or any(part in b.lower() for part in target_cand.split() if len(part) >= 3)
-                    for b in (inter.get("buttons", []) + inter.get("links", []) + inter.get("inputs", []))
-                )
+                has_in_interactive = False
+                for b in (inter.get("buttons", []) + inter.get("links", []) + inter.get("inputs", [])):
+                    b_lower = b.lower()
+                    is_nav_link = b_lower in nav_tabs
+                    is_action_target = any(act_word in target_cand for act_word in ["pay", "drop", "delete", "register", "submit", "confirm", "proceed"])
+                    if is_nav_link and is_action_target and target_cand != b_lower:
+                        continue
+
+                    if target_cand == b_lower or target_cand in b_lower:
+                        has_in_interactive = True
+                        break
+                    if len(b_lower) >= 4 and b_lower in target_cand:
+                        has_in_interactive = True
+                        break
+
                 target_exists_on_page = has_in_elements or has_in_interactive
                 if not target_exists_on_page:
                     logger.info("Click target '%s' is not an interactive element on current page. Skipping approval pause.", decision.target_element)
@@ -1049,6 +1106,13 @@ class TaskManager:
 
             # Subgoal checklist progress update (Requirement 19)
             post_text = (await browser.get_page_text()).lower()
+            payment_observed = any(term in post_text for term in [
+                "payment successful", "paid successfully", "receipt no", "transaction id",
+                "payment has been confirmed", "payment completed", "receipt generated", "payment receipt", "fee payment has been confirmed"
+            ])
+            if payment_observed:
+                run["_payment_completed"] = True
+
             for sg in subgoals:
                 if sg.completed:
                     continue
@@ -1065,7 +1129,7 @@ class TaskManager:
                     sg.completed = True
                     sg.status = "completed"
                     sg.verification_evidence = "Nonzero file verified on disk"
-                elif ("pay" in sg_d or "fee" in sg_d) and any(term in post_text for term in ["paid", "receipt", "successful", "transaction"]):
+                elif ("pay" in sg_d or "fee" in sg_d) and (payment_observed or any(term in post_text for term in ["paid", "receipt", "successful", "transaction"])):
                     sg.completed = True
                     sg.status = "completed"
                     sg.verification_evidence = "Payment confirmation observed"
@@ -1090,6 +1154,19 @@ class TaskManager:
                         sg.verification_evidence = f"Action '{act_type}' completed"
 
             _update_run(run_id, subgoals=[sg.model_dump() for sg in subgoals])
+
+            # Check if all required subgoals are verified complete
+            uncompleted_required = [sg for sg in subgoals if sg.required and not sg.completed]
+            if not uncompleted_required:
+                logger.info("All required subgoals verified complete. Concluding task run %s.", run_id)
+                self._emit_event(
+                    run_id,
+                    "subgoals_complete",
+                    "All Subgoals Completed Successfully",
+                    {"completed": [sg.description for sg in subgoals]},
+                )
+                is_completed = True
+                break
 
             # G. VERIFY: State verification
             next_step(
@@ -1439,7 +1516,15 @@ class TaskManager:
             run["result_status"] = "not_done"
             run["result_summary"] = "Task stopped by user (approval denied)."
         else:
-            approved_actions = run.setdefault("_approved_actions", set())
+            raw_approved = run.get("_approved_actions")
+            if isinstance(raw_approved, list):
+                approved_actions = set(raw_approved)
+            elif isinstance(raw_approved, set):
+                approved_actions = raw_approved
+            else:
+                approved_actions = set()
+            run["_approved_actions"] = approved_actions
+
             act_name = str(pending.get("action") or "").lower()
             tgt_name = str(pending.get("target") or "").lower()
             if act_name:

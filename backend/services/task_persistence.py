@@ -89,7 +89,10 @@ class TaskPersistence:
         for k, v in data.items():
             if k in {"browser", "_approval_event"}:
                 continue
-            sanitized[k] = v
+            if isinstance(v, set):
+                sanitized[k] = list(v)
+            else:
+                sanitized[k] = v
 
         try:
             data_json = json.dumps(sanitized, default=str)
@@ -137,6 +140,8 @@ class TaskPersistence:
                 for row in cursor.fetchall():
                     try:
                         data = json.loads(row["data_json"])
+                        if isinstance(data.get("_approved_actions"), list):
+                            data["_approved_actions"] = set(data["_approved_actions"])
                         runs[row["run_id"]] = data
                     except Exception:
                         pass
