@@ -236,7 +236,7 @@ class LLMService:
                 {"role": "system", "content": _REASONER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 400,
+            "max_tokens": 1000,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
         }

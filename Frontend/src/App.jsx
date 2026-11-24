@@ -290,9 +290,20 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
     setScreenshotError(false)
   }, [task?.id, task?.step, task?.current_action, task?.status, task?.updated_at])
 
+  // Auto-retry screenshot when temporary error occurs while agent is running
+  useEffect(() => {
+    if (screenshotError && !['completed', 'failed', 'stopped', 'not_done'].includes(task?.status)) {
+      const timer = setTimeout(() => {
+        setScreenshotError(false)
+        setScreenshotTimestamp(Date.now())
+      }, 1500)
+      return () => clearTimeout(timer)
+    }
+  }, [screenshotError, task?.status])
+
   const screenshotUrl = `${API_BASE}/api/automation/${task.id}/screenshot?t=${screenshotTimestamp}`
   const htmlUrl = `${API_BASE}/api/automation/${task.id}/html`
-  const isPendingApproval = task.status === 'needs_approval' || Boolean(task.pending_approval)
+  const isPendingApproval = Boolean(task?.pending_approval) && task.status === 'needs_approval'
   const isFinished = ['completed', 'failed', 'stopped', 'not_done'].includes(task.status)
 
   const handleApprove = async () => {
@@ -1411,7 +1422,7 @@ function App() {
         result_status: null,
         result_summary: null,
         latest_dom: { interactive: { links: [], buttons: [], inputs: [] }, tables_count: 0 },
-        pending_approval: data.status === 'needs_approval' ? { action: data.reason || 'Consequential action' } : null,
+        pending_approval: data.pending_approval || (data.status === 'needs_approval' && data.reason ? { action: data.reason, reason: data.reason } : null),
         downloaded_files: [],
         events: [
           {

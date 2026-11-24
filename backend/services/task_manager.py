@@ -258,9 +258,13 @@ class TaskManager:
         approval_request_id = str(uuid.uuid4())
         pending_approval_info = None
         if requires_pre_approval:
+            chosen_action = (
+                consequential_intents[0] if (is_consequential and consequential_intents)
+                else ("navigate_external_site" if is_review_site else "consequential_action")
+            )
             pending_approval_info = {
                 "approval_request_id": approval_request_id,
-                "action": (parsed_plan.intent if parsed_plan else "navigate_external_site"),
+                "action": chosen_action,
                 "reason": consequential_reason,
                 "description": f"Approval required before proceeding: {consequential_reason}",
             }
@@ -343,7 +347,8 @@ class TaskManager:
         if run["status"] in {"running", "done", "completed"}:
             return {"status": run["status"], "message": f"Run already in status '{run['status']}'."}
 
-        _update_run(run_id, status="running")
+        if run.get("status") != "needs_approval":
+            _update_run(run_id, status="running")
         owns_browser = browser is None
         active_browser = browser or BrowserService()
         run["browser"] = active_browser
@@ -587,6 +592,27 @@ class TaskManager:
             "constraints": plan.constraints,
         })
 
+        # Check if pre-execution review or initial approval is pending (Requirement 4)
+        if run.get("status") == "needs_approval" or run.get("pending_approval"):
+            logger.info("Run %s waiting for initial pre-execution approval", run_id)
+            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
+                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
+            })
+            approval_event = run.get("_approval_event")
+            if not approval_event:
+                approval_event = asyncio.Event()
+                run["_approval_event"] = approval_event
+
+            await approval_event.wait()
+
+            if not run.get("_approval_decision", False):
+                summary = "Task was cancelled or denied by user."
+                _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
+                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
+                return
+
+            _update_run(run_id, status="running", pending_approval=None)
+
         # ── 2. Browser: Launch & Navigate Immediately ─────────────────────────
         next_step("browser_start", reason="Launching Chromium automation session")
         self._emit_event(run_id, "browser_launch", "Launching Chromium Browser", {
@@ -647,27 +673,6 @@ class TaskManager:
             if task_id and not str(task_id).startswith("cp_"):
                 await self._report.submit(run_id, task_id, "not_done", summary)
             return
-
-        # Check if pre-execution review or initial approval is pending (Requirement 4)
-        if run.get("status") == "needs_approval":
-            logger.info("Run %s waiting for initial pre-execution approval", run_id)
-            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
-                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
-            })
-            approval_event = run.get("_approval_event")
-            if not approval_event:
-                approval_event = asyncio.Event()
-                run["_approval_event"] = approval_event
-
-            await approval_event.wait()
-
-            if not run.get("_approval_decision", False):
-                summary = "Task was cancelled or denied by user."
-                _update_run(run_id, status="stopped", result_status="not_done", result_summary=summary)
-                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
-                return
-
-            _update_run(run_id, status="running")
 
         # Login if credentials provided (Public websites work without credentials)
         if username and password:
@@ -882,39 +887,47 @@ class TaskManager:
                     reason=f"Irreversible action '{decision.action_type}' ({decision.target_element or ''}) requires human confirmation",
                 )
 
+                # Initialize event and reset state BEFORE broadcasting approval request
+                approval_event: asyncio.Event = run.setdefault("_approval_event", asyncio.Event())
+                approval_event.clear()
+                run["_approval_decision"] = None
+                approval_req_id = str(uuid.uuid4())
+
                 # Set awaiting_approval and notify frontend workspace
+                pending_info = {
+                    "approval_request_id": approval_req_id,
+                    "action": decision.action_type,
+                    "target": decision.target_element,
+                    "value": decision.target_value,
+                    "reason": decision.reasoning,
+                    "description": action_desc,
+                }
                 _update_run(
                     run_id,
                     status="needs_approval",
                     current_action=decision.action_type,
-                    pending_approval={
-                        "action": decision.action_type,
-                        "target": decision.target_element,
-                        "value": decision.target_value,
-                        "reason": decision.reasoning,
-                        "description": action_desc,
-                    },
+                    pending_approval=pending_info,
+                )
+                _persistence.save_approval_request(
+                    approval_request_id=approval_req_id,
+                    run_id=run_id,
+                    action=decision.action_type,
+                    description=action_desc,
+                    status="pending",
                 )
                 self._emit_event(run_id, "approval_required", "Approval Required", {
                     "action": decision.action_type,
                     "target": decision.target_element,
                     "description": action_desc,
                     "reason": decision.reasoning,
+                    "approval_request_id": approval_req_id,
                 })
 
-                # Check if this specific action was approved or wait for in-session UI approval (Section E)
-                action_approved = run.get("_approval_decision") is True
-                if not action_approved:
-                    approval_event: asyncio.Event = run.setdefault("_approval_event", asyncio.Event())
-                    approval_event.clear()
-                    run["_approval_decision"] = None
+                # Wait for user to decide in live workspace
+                logger.info("Task %s paused awaiting approval for action: %s", run_id, decision.action_type)
+                await approval_event.wait()
 
-                    # Wait for user to decide in live workspace
-                    logger.info("Task %s paused awaiting approval for action: %s", run_id, decision.action_type)
-                    await approval_event.wait()
-
-                    action_approved = bool(run.get("_approval_decision", False))
-
+                action_approved = bool(run.get("_approval_decision", False))
                 _update_run(run_id, pending_approval=None)
 
                 if not action_approved:
@@ -1345,6 +1358,11 @@ class TaskManager:
         run["_approval_decision"] = approved
         run["user_approved"] = approved
         run["pending_approval"] = None  # Single-use consumption (Requirement 6)
+        run["status"] = "running" if approved else "not_done"
+        run["current_action"] = "resuming" if approved else "denied"
+        if not approved:
+            run["result_status"] = "not_done"
+            run["result_summary"] = "Task stopped by user (approval denied)."
 
         if event:
             event.set()
