@@ -33,8 +33,9 @@ class Settings:
     )
     OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
-    # ── Frontend ──────────────────────────────────────────────────────────────
+    # ── Frontend & CORS ────────────────────────────────────────────────────────
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_DIRECTORY: str = os.getenv(
@@ -44,7 +45,12 @@ class Settings:
 
     # ── Browser ───────────────────────────────────────────────────────────────
     # Local desktop execution defaults to visible Chromium (headless=False)
-    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in (
+    # Cloud environments (Render, Linux container, etc.) default to headless=True
+    _is_cloud: bool = bool(
+        os.getenv("RENDER") or os.getenv("VERCEL") or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("CONTAINER")
+    )
+    _default_headless: str = "true" if _is_cloud else "false"
+    BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", _default_headless).lower() in (
         "true", "1", "yes"
     )
     BROWSER_TIMEOUT_MS: int = int(os.getenv("BROWSER_TIMEOUT_MS", "30000"))
@@ -59,8 +65,9 @@ class Settings:
         str(Path(__file__).parent.parent / "data" / "tasks.db"),
     )
 
-    # ── App ───────────────────────────────────────────────────────────────────
+    # ── App & Server ──────────────────────────────────────────────────────────
     APP_ENV: str = os.getenv("APP_ENV", "development")
+    PORT: int = int(os.getenv("PORT", "8000"))
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
     def validate(self) -> list[str]:

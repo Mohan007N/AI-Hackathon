@@ -9,7 +9,12 @@ import {
   Table, Terminal, Trash2, User, UserPlus, X, Zap
 } from 'lucide-react'
 
-const API_BASE = (import.meta.env.VITE_AUTOMATION_API_URL || '').trim().replace(/\/$/, '')
+const API_BASE = (
+  import.meta.env.VITE_AUTOMATION_API_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_BACKEND_URL ||
+  ''
+).trim().replace(/\/$/, '')
 const USERS_KEY = 'campuspilot-demo-users-v2'
 const SESSION_KEY = 'campuspilot-demo-session-v2'
 const RECORDS_PREFIX = 'campuspilot-records-v2:'

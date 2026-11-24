@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: campuspilot-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    region: oregon
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: LLM_PROVIDER
+        value: groq
+      - key: BROWSER_HEADLESS
+        value: "true"
+      - key: APP_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PORTAL_URL
+        sync: false
+      - key: TEAM_CODE
+        sync: false

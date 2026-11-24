@@ -43,11 +43,16 @@ class BrowserService:
     async def start(self) -> None:
         """Launch Chromium browser and configure viewport and timeouts."""
         from playwright.async_api import async_playwright
+        import sys
+
+        launch_args = ["--disable-blink-features=AutomationControlled"]
+        if sys.platform.startswith("linux") or os.getenv("RENDER") or os.getenv("CONTAINER"):
+            launch_args.extend(["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
 
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
             headless=settings.BROWSER_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=launch_args,
         )
         self._context = await self._browser.new_context(
             viewport={"width": 1280, "height": 800},

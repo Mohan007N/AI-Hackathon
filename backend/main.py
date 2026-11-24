@@ -68,16 +68,21 @@ app = FastAPI(
 )
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
+_cors_origins = [
+    settings.FRONTEND_URL,
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+if getattr(settings, "CORS_ORIGINS", ""):
+    _cors_origins.extend([o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.FRONTEND_URL,
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
+    allow_origins=_cors_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -149,8 +154,10 @@ async def llm_diagnostic():
     return await llm.check_connectivity()
 
 
-# ── Dev entry point ────────────────────────────────────────────────────────────
+# ── Server entry point ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", getattr(settings, "PORT", 8000)))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
 
