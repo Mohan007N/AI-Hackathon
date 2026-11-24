@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   Activity, AlertCircle, AlertOctagon, AlertTriangle, ArrowRight, ArrowUpRight,
-  Bot, Check, CheckCircle2, ChevronRight, Clock3, Download, ExternalLink, Eye,
-  EyeOff, FileText, Globe2, History, Info, LayoutDashboard, Link2, ListChecks,
-  LoaderCircle, LockKeyhole, LogOut, Menu, Monitor, Play, Plus, RefreshCw,
-  Search, Send, ShieldAlert, ShieldCheck, Sparkles, Square, Terminal, Trash2,
-  User, UserPlus, X, Zap
+  Bot, Check, CheckCircle2, ChevronRight, Clock3, Code, Copy, Download, ExternalLink,
+  Eye, EyeOff, FileText, Globe2, History, Info, LayoutDashboard, Layers, Link2,
+  ListChecks, LoaderCircle, LockKeyhole, LogOut, Menu, Monitor, MousePointerClick,
+  Play, Plus, RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Sparkles, Square,
+  Table, Terminal, Trash2, User, UserPlus, X, Zap
 } from 'lucide-react'
 
 const API_BASE = (import.meta.env.VITE_AUTOMATION_API_URL || '').trim().replace(/\/$/, '')
@@ -269,6 +269,12 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
   const [screenshotError, setScreenshotError] = useState(false)
   const [approvalSubmitting, setApprovalSubmitting] = useState(false)
   const [stopSubmitting, setStopSubmitting] = useState(false)
+  const [centerView, setCenterView] = useState('screenshot') // 'screenshot' | 'dom' | 'html'
+  const [domTab, setDomTab] = useState('buttons') // 'buttons' | 'links' | 'inputs' | 'tables' | 'text'
+  const [actionBusy, setActionBusy] = useState(false)
+  const [actionNotice, setActionNotice] = useState(null)
+  const [domSearch, setDomSearch] = useState('')
+  const [fieldInputs, setFieldInputs] = useState({})
   const eventsBottomRef = useRef(null)
 
   // Auto-scroll event feed on new events
@@ -285,6 +291,7 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
   }, [task?.id, task?.step, task?.current_action, task?.status, task?.updated_at])
 
   const screenshotUrl = `${API_BASE}/api/automation/${task.id}/screenshot?t=${screenshotTimestamp}`
+  const htmlUrl = `${API_BASE}/api/automation/${task.id}/html`
   const isPendingApproval = task.status === 'needs_approval' || Boolean(task.pending_approval)
   const isFinished = ['completed', 'failed', 'stopped', 'not_done'].includes(task.status)
 
@@ -315,12 +322,56 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
     }
   }
 
+  const handleManualAction = async (action_type, target, value = '') => {
+    if (!task?.id || actionBusy) return
+    setActionBusy(true)
+    setActionNotice(null)
+    try {
+      const res = await axios.post(`${API_BASE}/api/automation/${task.id}/act`, {
+        action_type,
+        target,
+        value
+      })
+      if (res.data?.success) {
+        setActionNotice({ type: 'success', text: `Action "${action_type}" executed on ${target}` })
+        setScreenshotTimestamp(Date.now())
+      } else {
+        setActionNotice({ type: 'error', text: res.data?.error || 'Action failed' })
+      }
+    } catch (err) {
+      setActionNotice({ type: 'error', text: err.response?.data?.detail || err.message || 'Action failed' })
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
   const dom = task.latest_dom || {}
   const interactive = dom.interactive || {}
-  const linksCount = interactive.links?.length ?? 0
-  const buttonsCount = interactive.buttons?.length ?? 0
-  const inputsCount = interactive.inputs?.length ?? 0
-  const tablesCount = dom.tables_count ?? 0
+  const elements = dom.elements || []
+  const linksList = interactive.links || []
+  const buttonsList = interactive.buttons || []
+  const inputsList = interactive.inputs || []
+  const tablesList = dom.tables || []
+  const textSnippet = dom.text_snippet || ''
+  const linksCount = linksList.length
+  const buttonsCount = buttonsList.length
+  const inputsCount = inputsList.length
+  const tablesCount = dom.tables_count ?? tablesList.length
+
+  const filteredElements = useMemo(() => {
+    if (!domSearch.trim()) return elements
+    const q = domSearch.toLowerCase()
+    return elements.filter(el =>
+      (el.id && el.id.toLowerCase().includes(q)) ||
+      (el.text && el.text.toLowerCase().includes(q)) ||
+      (el.tag && el.tag.toLowerCase().includes(q)) ||
+      (el.placeholder && el.placeholder.toLowerCase().includes(q)) ||
+      (el.name && el.name.toLowerCase().includes(q)) ||
+      (el.role && el.role.toLowerCase().includes(q))
+    )
+  }, [elements, domSearch])
+
+  const liveTargetUrl = cleanUrl(task.current_url || task.url)
 
   return (
     <div className="workspace-shell">
@@ -337,8 +388,8 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
             <span className="ws-sep">·</span>
             <span className="ws-target-link">
               <Globe2 size={13} />
-              <a href={cleanUrl(task.url)} target="_blank" rel="noreferrer">
-                {task.url} <ArrowUpRight size={12} />
+              <a href={liveTargetUrl} target="_blank" rel="noreferrer" title="Open destination in browser">
+                {task.current_url || task.url} <ArrowUpRight size={12} />
               </a>
             </span>
             {task.current_title && (
@@ -349,6 +400,16 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
                 </span>
               </>
             )}
+            <span className="ws-sep">·</span>
+            <a
+              href={liveTargetUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="ws-live-link-pill"
+              title="Open current live DOM page in a separate browser tab"
+            >
+              <ExternalLink size={12} /> Open Live Page
+            </a>
           </div>
         </div>
 
@@ -387,8 +448,8 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
             </div>
             <div className="ws-meta-row">
               <span className="ws-label">TARGET URL</span>
-              <a href={cleanUrl(task.url)} target="_blank" rel="noreferrer" className="ws-url-val">
-                {task.url} <ExternalLink size={12} />
+              <a href={liveTargetUrl} target="_blank" rel="noreferrer" className="ws-url-val">
+                {task.current_url || task.url} <ExternalLink size={12} />
               </a>
             </div>
             <div className="ws-meta-row">
@@ -448,6 +509,46 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
                 </span>
                 {!isFinished && <LoaderCircle size={13} className="spin addr-spinner" />}
               </div>
+
+              {/* View Switcher Tabs: Screenshot | Inspect DOM | Page HTML */}
+              <div className="browser-view-tabs">
+                <button
+                  type="button"
+                  className={`bview-btn ${centerView === 'screenshot' ? 'active' : ''}`}
+                  onClick={() => setCenterView('screenshot')}
+                  title="View live Playwright desktop screenshot"
+                >
+                  <Monitor size={12} /> Screenshot
+                </button>
+                <button
+                  type="button"
+                  className={`bview-btn ${centerView === 'dom' ? 'active' : ''}`}
+                  onClick={() => setCenterView('dom')}
+                  title="Inspect extracted DOM interactive elements"
+                >
+                  <Code size={12} /> DOM ({elements.length})
+                </button>
+                <button
+                  type="button"
+                  className={`bview-btn ${centerView === 'html' ? 'active' : ''}`}
+                  onClick={() => setCenterView('html')}
+                  title="View live rendered HTML iframe"
+                >
+                  <Layers size={12} /> Page HTML
+                </button>
+              </div>
+
+              <a
+                href={liveTargetUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="browser-open-btn"
+                title="Open live website in a new tab"
+              >
+                <ExternalLink size={13} />
+                <span>Open in Tab</span>
+              </a>
+
               <button
                 className="icon-button browser-reload-btn"
                 onClick={() => setScreenshotTimestamp(Date.now())}
@@ -458,30 +559,119 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
             </div>
 
             <div className="browser-viewport">
-              <div className="browser-watermark">
-                <Monitor size={12} />
-                <span>LIVE PLAYWRIGHT CHROMIUM (READ-ONLY VIEW)</span>
-              </div>
+              {centerView === 'screenshot' && (
+                <>
+                  <div className="browser-watermark">
+                    <Monitor size={12} />
+                    <span>LIVE PLAYWRIGHT CHROMIUM (READ-ONLY VIEW)</span>
+                  </div>
 
-              {!screenshotError ? (
-                <img
-                  src={screenshotUrl}
-                  alt="Live Playwright Chromium View"
-                  className="browser-screenshot-img"
-                  onError={() => setScreenshotError(true)}
-                />
-              ) : (
-                <div className="browser-fallback">
-                  <Monitor size={42} />
-                  <strong>Playwright Chromium Window Active</strong>
-                  <p>Browser session is running on local desktop. Visible Chromium window is active.</p>
-                  <button
-                    className="button secondary small"
-                    onClick={() => { setScreenshotError(false); setScreenshotTimestamp(Date.now()) }}
-                  >
-                    <RefreshCw size={13} /> Try reloading frame
-                  </button>
+                  {!screenshotError ? (
+                    <img
+                      src={screenshotUrl}
+                      alt="Live Playwright Chromium View"
+                      className="browser-screenshot-img"
+                      onError={() => setScreenshotError(true)}
+                    />
+                  ) : (
+                    <div className="browser-fallback">
+                      <Monitor size={42} />
+                      <strong>Playwright Chromium Window Active</strong>
+                      <p>Browser session is running on local desktop. Visible Chromium window is active.</p>
+                      <button
+                        className="button secondary small"
+                        onClick={() => { setScreenshotError(false); setScreenshotTimestamp(Date.now()) }}
+                      >
+                        <RefreshCw size={13} /> Try reloading frame
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {centerView === 'dom' && (
+                <div className="browser-dom-inspector">
+                  <div className="bdom-head">
+                    <div>
+                      <strong>Extracted DOM Elements ({elements.length})</strong>
+                      <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                        Accessible elements discovered by Playwright on current page
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      className="bdom-search"
+                      placeholder="Filter elements (text, tag, ID)..."
+                      value={domSearch}
+                      onChange={e => setDomSearch(e.target.value)}
+                    />
+                  </div>
+
+                  {filteredElements.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '30px', color: '#94a3b8', fontSize: '12px' }}>
+                      No elements match your filter or page has no interactive elements.
+                    </div>
+                  ) : (
+                    <div className="bdom-elements-list">
+                      {filteredElements.map((el, idx) => {
+                        const isInput = el.tag === 'input' || el.tag === 'textarea' || el.role === 'textbox'
+                        return (
+                          <div key={idx} className="bdom-card">
+                            <div className="bdom-card-info">
+                              <div className="bdom-card-top">
+                                <span className="bdom-card-tag">{el.tag || el.role || 'element'}</span>
+                                <span className="bdom-card-id">{el.id}</span>
+                                {el.type && <span style={{ fontSize: '10px', color: '#64748b' }}>type={el.type}</span>}
+                                {el.name && <span style={{ fontSize: '10px', color: '#64748b' }}>name={el.name}</span>}
+                              </div>
+                              <div className="bdom-card-text">
+                                {el.text || el.placeholder || el.aria_label || el.name || '—'}
+                              </div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              {isInput ? (
+                                <div className="dom-item-input-group">
+                                  <input
+                                    type="text"
+                                    placeholder="Enter text..."
+                                    value={fieldInputs[el.id] || ''}
+                                    onChange={e => setFieldInputs({ ...fieldInputs, [el.id]: e.target.value })}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="bdom-card-act-btn"
+                                    disabled={actionBusy}
+                                    onClick={() => handleManualAction('fill', el.id, fieldInputs[el.id] || '')}
+                                  >
+                                    Fill
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="bdom-card-act-btn"
+                                  disabled={actionBusy}
+                                  onClick={() => handleManualAction('click', el.id)}
+                                >
+                                  <MousePointerClick size={12} /> Click
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
+              )}
+
+              {centerView === 'html' && (
+                <iframe
+                  src={htmlUrl}
+                  title="Live Page DOM HTML"
+                  className="browser-html-frame"
+                  sandbox="allow-same-origin allow-scripts"
+                />
               )}
             </div>
 
@@ -537,30 +727,200 @@ function AgentWorkspace({ task, onStop, onApprovalDecision, onNewTask, onViewRec
             </div>
           )}
 
-          {/* DOM Observation Summary */}
+          {/* DOM Observation Summary & Interactive Inspection */}
           <div className="ws-card">
             <div className="ws-card-header">
               <Globe2 size={16} />
               <h3>DOM Observation</h3>
+              <a
+                href={liveTargetUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: '11px', color: '#2563eb', display: 'inline-flex', alignItems: 'center', gap: '3px', marginLeft: 'auto' }}
+                title="Open current page in browser"
+              >
+                <ExternalLink size={11} /> Open Page
+              </a>
             </div>
+
+            {/* Clickable Metric Tabs */}
             <div className="dom-metrics-grid">
-              <div className="dom-metric">
-                <span className="dom-num">{linksCount}</span>
-                <span className="dom-label">Links</span>
-              </div>
-              <div className="dom-metric">
+              <div
+                className={`dom-metric ${domTab === 'buttons' ? 'active' : ''}`}
+                onClick={() => setDomTab('buttons')}
+                title="Inspect buttons"
+              >
                 <span className="dom-num">{buttonsCount}</span>
                 <span className="dom-label">Buttons</span>
               </div>
-              <div className="dom-metric">
+              <div
+                className={`dom-metric ${domTab === 'links' ? 'active' : ''}`}
+                onClick={() => setDomTab('links')}
+                title="Inspect links"
+              >
+                <span className="dom-num">{linksCount}</span>
+                <span className="dom-label">Links</span>
+              </div>
+              <div
+                className={`dom-metric ${domTab === 'inputs' ? 'active' : ''}`}
+                onClick={() => setDomTab('inputs')}
+                title="Inspect inputs"
+              >
                 <span className="dom-num">{inputsCount}</span>
                 <span className="dom-label">Inputs</span>
               </div>
-              <div className="dom-metric">
+              <div
+                className={`dom-metric ${domTab === 'tables' ? 'active' : ''}`}
+                onClick={() => setDomTab('tables')}
+                title="Inspect tables"
+              >
                 <span className="dom-num">{tablesCount}</span>
                 <span className="dom-label">Tables</span>
               </div>
             </div>
+
+            {/* Action Feedback Banner */}
+            {actionNotice && (
+              <div style={{
+                marginTop: '8px',
+                padding: '6px 10px',
+                borderRadius: '5px',
+                fontSize: '11px',
+                background: actionNotice.type === 'success' ? '#ecfdf5' : '#fef2f2',
+                color: actionNotice.type === 'success' ? '#065f46' : '#991b1b',
+                border: `1px solid ${actionNotice.type === 'success' ? '#a7f3d0' : '#fecaca'}`
+              }}>
+                {actionNotice.text}
+              </div>
+            )}
+
+            {/* Tab: Buttons */}
+            {domTab === 'buttons' && (
+              <div className="dom-items-list">
+                {buttonsList.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '16px', color: '#94a3b8', fontSize: '11px' }}>
+                    No buttons detected on current view.
+                  </div>
+                ) : (
+                  buttonsList.map((btn, idx) => (
+                    <div key={idx} className="dom-item-row">
+                      <div className="dom-item-info">
+                        <span className="dom-item-id">{btn.id}</span>
+                        <span className="dom-item-text">{btn.text || btn.type || 'Button'}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="dom-item-act-btn"
+                        disabled={actionBusy}
+                        onClick={() => handleManualAction('click', btn.id)}
+                        title="Click this button as agent"
+                      >
+                        <MousePointerClick size={11} /> Click
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab: Links */}
+            {domTab === 'links' && (
+              <div className="dom-items-list">
+                {linksList.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '16px', color: '#94a3b8', fontSize: '11px' }}>
+                    No links detected on current view.
+                  </div>
+                ) : (
+                  linksList.map((lnk, idx) => (
+                    <div key={idx} className="dom-item-row">
+                      <div className="dom-item-info">
+                        <span className="dom-item-id">{lnk.id}</span>
+                        <span className="dom-item-text">{lnk.text || lnk.href || 'Link'}</span>
+                      </div>
+                      <button
+                        type="button"
+                        className="dom-item-act-btn"
+                        disabled={actionBusy}
+                        onClick={() => handleManualAction('click', lnk.id)}
+                        title="Navigate through this link"
+                      >
+                        <ArrowRight size={11} /> Open
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab: Inputs */}
+            {domTab === 'inputs' && (
+              <div className="dom-items-list">
+                {inputsList.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '16px', color: '#94a3b8', fontSize: '11px' }}>
+                    No input fields detected on current view.
+                  </div>
+                ) : (
+                  inputsList.map((inp, idx) => (
+                    <div key={idx} className="dom-item-row">
+                      <div className="dom-item-info">
+                        <span className="dom-item-id">{inp.id}</span>
+                        <span className="dom-item-text">{inp.placeholder || inp.name || inp.type || 'Input'}</span>
+                      </div>
+                      <div className="dom-item-input-group">
+                        <input
+                          type="text"
+                          placeholder="Value..."
+                          value={fieldInputs[inp.id] || ''}
+                          onChange={e => setFieldInputs({ ...fieldInputs, [inp.id]: e.target.value })}
+                        />
+                        <button
+                          type="button"
+                          className="dom-item-act-btn"
+                          disabled={actionBusy}
+                          onClick={() => handleManualAction('fill', inp.id, fieldInputs[inp.id] || '')}
+                        >
+                          Fill
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab: Tables */}
+            {domTab === 'tables' && (
+              <div className="dom-table-wrap">
+                {tablesList.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '16px', color: '#94a3b8', fontSize: '11px' }}>
+                    No data tables extracted from page.
+                  </div>
+                ) : (
+                  tablesList.map((tbl, tIdx) => (
+                    <div key={tIdx} style={{ marginBottom: '10px' }}>
+                      <div style={{ fontSize: '11px', fontWeight: 600, color: '#475569', marginBottom: '4px' }}>
+                        Table {tIdx + 1} ({tbl.length} rows)
+                      </div>
+                      <table className="dom-extracted-table">
+                        <tbody>
+                          {tbl.map((row, rIdx) => (
+                            <tr key={rIdx}>
+                              {row.map((cell, cIdx) => (
+                                rIdx === 0 ? (
+                                  <th key={cIdx}>{cell}</th>
+                                ) : (
+                                  <td key={cIdx}>{cell}</td>
+                                )
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
 
           {/* AI Reasoning & Action Proposal */}

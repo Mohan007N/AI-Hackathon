@@ -62,6 +62,12 @@ class AutomationApprovalRequest(BaseModel):
     reason: Optional[str] = ""
 
 
+class UserActionRequest(BaseModel):
+    action_type: str = "click"  # "click" | "fill_form" | "navigate"
+    target: str                 # element_id (elem_1) or semantic label / text / URL
+    value: Optional[str] = ""
+
+
 class AutomationStatusResponse(BaseModel):
     task_id: str
     status: str       # "started" | "running" | "needs_approval" | "completed" | "not_done" | "failed" | "stopped"
@@ -269,7 +275,55 @@ async def respond_to_approval(task_id: str, body: AutomationApprovalRequest):
     return res
 
 
-# ── 6. Stop Task ──────────────────────────────────────────────────────────────
+# ── 6. Live DOM Inspection & User Manual Access ──────────────────────────────
+
+@router.get(
+    "/{task_id}/dom",
+    summary="Get full structured DOM elements, tables, and interactive controls for user inspection",
+)
+async def get_task_dom(task_id: str):
+    run = _manager.get_status(task_id)
+    if not run:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task '{task_id}' not found.",
+        )
+    return run.get("latest_dom", {})
+
+
+@router.get(
+    "/{task_id}/html",
+    summary="Get live HTML content of the page for user preview",
+)
+async def get_task_html(task_id: str):
+    run = _manager.get_status(task_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found.")
+    live_run = get_run(task_id)
+    browser = live_run.get("browser") if live_run else None
+    if browser and getattr(browser, "_page", None):
+        try:
+            content = await browser._page.content()
+            return Response(content=content, media_type="text/html")
+        except Exception:
+            pass
+    text = run.get("latest_dom", {}).get("text_snippet", "")
+    return Response(content=f"<!DOCTYPE html><html><body><pre>{text}</pre></body></html>", media_type="text/html")
+
+
+@router.post(
+    "/{task_id}/act",
+    summary="User manual action intervention on the live page DOM",
+)
+async def user_act_on_dom(task_id: str, body: UserActionRequest):
+    run = _manager.get_status(task_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Task '{task_id}' not found.")
+    res = await _manager.manual_user_action(task_id, body.action_type, body.target, body.value or "")
+    return res
+
+
+# ── 7. Stop Task ──────────────────────────────────────────────────────────────
 
 @router.post(
     "/{task_id}/stop",

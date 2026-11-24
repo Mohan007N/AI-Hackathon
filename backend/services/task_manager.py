@@ -1385,6 +1385,58 @@ class TaskManager:
 
         return {"success": True, "message": f"Task '{run_id}' stopped.", "run_id": run_id}
 
+    async def manual_user_action(
+        self,
+        run_id: str,
+        action_type: str,
+        target: str,
+        value: str = "",
+    ) -> dict[str, Any]:
+        """Allow user to directly interact with the live page DOM (User-in-the-loop intervention)."""
+        run = get_run(run_id)
+        if not run:
+            return {"success": False, "message": f"Run '{run_id}' not found."}
+
+        browser: Optional[BrowserService] = run.get("browser")
+        if not browser or not getattr(browser, "_page", None):
+            return {"success": False, "message": "Browser is not active or page is closed."}
+
+        step = run.get("step", 0) + 1
+        log_action(run_id, step, f"user_manual_{action_type}", target=target, value=value)
+        self._emit_event(run_id, "user_action", f"User Manual Action: {action_type}", {
+            "action_type": action_type,
+            "target": target,
+            "value": value,
+        })
+
+        success = await self._dispatch_browser_action(browser, action_type, target, value, run)
+
+        # Settle navigation / redirects and re-extract DOM
+        await browser.wait_for_navigation(timeout_ms=2500)
+        page_structure = await browser.extract_page_structure()
+        cur_url = page_structure.get("url") or (await browser.get_current_url())
+        cur_title = page_structure.get("title") or ""
+        shot = await browser.take_screenshot(name=f"{run_id}_user_act_{step}")
+        if shot:
+            _update_run(run_id, latest_screenshot_path=shot)
+        _update_run(run_id, latest_dom=page_structure, current_url=cur_url, current_title=cur_title, step=step)
+
+        self._emit_event(run_id, "observe", f"DOM Updated after User {action_type}", {
+            "url": cur_url,
+            "title": cur_title,
+            "interactive": page_structure.get("interactive", {}),
+            "tables_count": page_structure.get("tables_count", 0),
+        })
+
+        return {
+            "success": success,
+            "action_type": action_type,
+            "target": target,
+            "current_url": cur_url,
+            "current_title": cur_title,
+            "latest_dom": page_structure,
+        }
+
     async def event_generator(self, run_id: str) -> AsyncGenerator[str, None]:
         """Server-Sent Events generator streaming live events for a task."""
         last_id = 0
