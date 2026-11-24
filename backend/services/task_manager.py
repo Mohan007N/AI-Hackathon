@@ -233,14 +233,24 @@ class TaskManager:
         consequential_reason = review_reason
         try:
             parsed_plan = await self._llm.parse_task_request(effective_prompt)
-            # Consequential actions are strictly state-changing irreversible operations (payment, registration, leave submission)
+            # Consequential actions are strictly state-changing irreversible operations (payment, registration, leave submission, elective drop)
             consequential_intents = [
                 act for act in (parsed_plan.actions + [parsed_plan.intent])
-                if self._approval.is_irreversible(act) or any(k in act.lower() for k in ["pay_fee", "register_elective", "submit_leave"])
+                if self._approval.is_irreversible(act) or any(k in act.lower() for k in ["pay_fee", "register_elective", "submit_leave", "drop_elective"])
             ]
-            is_consequential = bool(consequential_intents) or any(k in effective_prompt.lower() for k in ["pay fee", "pay tuition", "make payment", "register for", "enroll in", "submit leave"])
+            is_consequential = bool(consequential_intents) or any(k in effective_prompt.lower() for k in ["pay fee", "pay tuition", "make payment", "register for", "enroll in", "submit leave", "drop elective"])
             if is_consequential and not user_approved:
-                intent_label = consequential_intents[0] if consequential_intents else "irreversible_operation"
+                if consequential_intents:
+                    intent_label = consequential_intents[0]
+                elif any(k in effective_prompt.lower() for k in ["pay fee", "pay tuition", "make payment"]):
+                    intent_label = "pay_fee"
+                elif any(k in effective_prompt.lower() for k in ["register for", "enroll in"]):
+                    intent_label = "register_elective"
+                elif any(k in effective_prompt.lower() for k in ["drop"]):
+                    intent_label = "drop_elective"
+                else:
+                    intent_label = "irreversible_operation"
+
                 consequential_reason = f"Consequential action detected: {intent_label}. Human approval required."
                 log_action(
                     run_id=run_id,
@@ -259,7 +269,7 @@ class TaskManager:
         pending_approval_info = None
         if requires_pre_approval:
             chosen_action = (
-                consequential_intents[0] if (is_consequential and consequential_intents)
+                intent_label if is_consequential
                 else ("navigate_external_site" if is_review_site else "consequential_action")
             )
             pending_approval_info = {
@@ -592,28 +602,7 @@ class TaskManager:
             "constraints": plan.constraints,
         })
 
-        # Check if pre-execution review or initial approval is pending (Requirement 4)
-        if run.get("status") == "needs_approval" or run.get("pending_approval"):
-            logger.info("Run %s waiting for initial pre-execution approval", run_id)
-            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
-                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
-            })
-            approval_event = run.get("_approval_event")
-            if not approval_event:
-                approval_event = asyncio.Event()
-                run["_approval_event"] = approval_event
-
-            await approval_event.wait()
-
-            if not run.get("_approval_decision", False):
-                summary = "Task was cancelled or denied by user."
-                _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
-                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
-                return
-
-            _update_run(run_id, status="running", pending_approval=None)
-
-        # ── 2. Browser: Launch & Navigate Immediately ─────────────────────────
+        # ── 2. Browser: Launch & Navigate Immediately (Requirement 4: initialize browser session) ──
         next_step("browser_start", reason="Launching Chromium automation session")
         self._emit_event(run_id, "browser_launch", "Launching Chromium Browser", {
             "headless": False,
@@ -673,6 +662,27 @@ class TaskManager:
             if task_id and not str(task_id).startswith("cp_"):
                 await self._report.submit(run_id, task_id, "not_done", summary)
             return
+
+        # Check if pre-execution review or initial approval is pending (Requirement 4)
+        if run.get("status") == "needs_approval" or run.get("pending_approval"):
+            logger.info("Run %s waiting for initial pre-execution approval", run_id)
+            self._emit_event(run_id, "approval_required", "Pre-execution Approval Required", {
+                "reason": run.get("pending_approval", {}).get("reason", "Authorization required to proceed.")
+            })
+            approval_event = run.get("_approval_event")
+            if not approval_event:
+                approval_event = asyncio.Event()
+                run["_approval_event"] = approval_event
+
+            await approval_event.wait()
+
+            if not run.get("_approval_decision", False):
+                summary = "Task was cancelled or denied by user."
+                _update_run(run_id, status="not_done", result_status="not_done", result_summary=summary)
+                self._emit_event(run_id, "stopped", "Task Cancelled by User", {"reason": summary})
+                return
+
+            _update_run(run_id, status="running", pending_approval=None)
 
         # Login if credentials provided (Public websites work without credentials)
         if username and password:
@@ -868,13 +878,59 @@ class TaskManager:
                 log_action(run_id, step, "action_blocked", target=decision.target_element, reason=prop_sec.reason, result="blocked")
                 continue
 
-            # Evaluate click targets, not only action names (Section E)
-            target_str = str(decision.target_element or "").lower()
-            is_target_sensitive = any(term in target_str for term in [
-                "pay", "fee", "payment", "enroll", "register", "delete", "cancel", "drop", "submit"
-            ])
-            requires_human_approval = decision.is_irreversible or self._approval.is_irreversible(decision.action_type) or (
-                decision.action_type in {"click", "submit_form"} and is_target_sensitive
+            # Evaluate click targets, resolving temporary element IDs to their DOM text (Section E)
+            target_raw = str(decision.target_element or "")
+            target_resolved_text = target_raw
+            if re.match(r"^elem_\d+$", target_raw):
+                for el in page_structure.get("elements", []):
+                    if el.get("id") == target_raw:
+                        target_resolved_text = f"{el.get('text', '')} {el.get('name', '')} {el.get('aria_label', '')} {target_raw}"
+                        break
+
+            target_str = (target_raw + " " + target_resolved_text).lower()
+            reasoning_str = str(decision.reasoning or "").lower()
+            is_target_sensitive = any(term in target_str or term in reasoning_str for term in [
+                "pay", "fee", "payment", "enroll", "register", "delete", "cancel", "drop"
+            ]) or (decision.action_type == "submit_form" and any(term in reasoning_str for term in ["pay", "fee", "enroll", "register"]))
+
+            # Check if this action/target was already approved in this session
+            approved_actions = run.setdefault("_approved_actions", set())
+            action_target_key = f"{decision.action_type.lower()}:{target_str}"
+            is_already_approved = (
+                action_target_key in approved_actions
+                or decision.action_type.lower() in approved_actions
+                or target_str in approved_actions
+                or any(term in approved_actions for term in ["drop", "register", "pay", "fee", "submit", "delete", "cancel"] if term in target_str or term in decision.action_type.lower())
+            )
+
+            # Check if target element exists on page before prompting human approval
+            target_exists_on_page = True
+            is_semantic_irreversible_type = (
+                decision.is_irreversible or self._approval.is_irreversible(decision.action_type)
+            )
+            if decision.action_type == "click" and not is_semantic_irreversible_type:
+                target_cand = target_raw.strip().lower()
+                has_in_elements = any(
+                    target_cand == (el.get("id", "") or "").lower()
+                    or target_cand in (el.get("text", "") or "").lower()
+                    or target_cand in (el.get("name", "") or "").lower()
+                    or target_cand in (el.get("placeholder", "") or "").lower()
+                    or any(part in (el.get("text", "") or "").lower() for part in target_cand.split() if len(part) >= 3)
+                    for el in page_structure.get("elements", [])
+                )
+                inter = page_structure.get("interactive", {})
+                has_in_interactive = any(
+                    target_cand in b.lower() or any(part in b.lower() for part in target_cand.split() if len(part) >= 3)
+                    for b in (inter.get("buttons", []) + inter.get("links", []) + inter.get("inputs", []))
+                )
+                target_exists_on_page = has_in_elements or has_in_interactive
+                if not target_exists_on_page:
+                    logger.info("Click target '%s' is not an interactive element on current page. Skipping approval pause.", decision.target_element)
+
+            requires_human_approval = not is_already_approved and target_exists_on_page and (
+                decision.is_irreversible or self._approval.is_irreversible(decision.action_type) or (
+                    decision.action_type in {"click", "submit_form"} and is_target_sensitive
+                )
             )
 
             # E. IRREVERSIBLE ACTIONS GATE: Human In The Loop (Issue 6 & Section E)
@@ -943,6 +999,15 @@ class TaskManager:
                 _update_run(run_id, status="running")
                 run["_approval_decision"] = None
 
+                approved_actions = run.setdefault("_approved_actions", set())
+                approved_actions.add(decision.action_type.lower())
+                if decision.target_element:
+                    approved_actions.add(str(decision.target_element).lower())
+                    approved_actions.add(f"{decision.action_type.lower()}:{str(decision.target_element).lower()}")
+                for term in ["drop", "delete", "register", "enroll", "pay", "fee", "submit"]:
+                    if term in decision.action_type.lower() or term in str(decision.target_element or "").lower():
+                        approved_actions.add(term)
+
                 # If approved, also check official confirm.py if available
                 confirm_result = await self._approval.request_confirmation(
                     action_description=action_desc,
@@ -966,6 +1031,16 @@ class TaskManager:
 
             next_step(f"execute_{act_type}", target=target, reason=decision.reasoning)
             act_success = await self._dispatch_browser_action(browser, act_type, target, val, run)
+
+            if not act_success:
+                logger.warning("Action '%s' on '%s' failed to execute on current page", act_type, target)
+                avail_summary = [e.get('text') for e in page_structure.get('elements', []) if e.get('text')][:8]
+                actions_history.append({
+                    "step": step,
+                    "action": f"{act_type}_failed",
+                    "target": target,
+                    "reason": f"Element '{target}' was not found or could not be clicked. Visible elements on this page: {avail_summary}. If this action requires opening a modal, dropdown, or menu, click 'More', 'Options', or the relevant row first.",
+                })
 
             # Updated screenshot after action
             shot = await browser.take_screenshot(name=f"{run_id}_act_{executed_actions_count}")
@@ -1363,6 +1438,18 @@ class TaskManager:
         if not approved:
             run["result_status"] = "not_done"
             run["result_summary"] = "Task stopped by user (approval denied)."
+        else:
+            approved_actions = run.setdefault("_approved_actions", set())
+            act_name = str(pending.get("action") or "").lower()
+            tgt_name = str(pending.get("target") or "").lower()
+            if act_name:
+                approved_actions.add(act_name)
+            if tgt_name:
+                approved_actions.add(tgt_name)
+                approved_actions.add(f"{act_name}:{tgt_name}")
+            for term in ["drop", "delete", "register", "enroll", "pay", "fee"]:
+                if term in act_name or term in tgt_name or term in str(pending.get("description", "")).lower():
+                    approved_actions.add(term)
 
         if event:
             event.set()

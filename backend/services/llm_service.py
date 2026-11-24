@@ -153,7 +153,7 @@ class LLMService:
         student_request: str,
         *,
         model: Optional[str] = None,
-        max_tokens: int = 600,
+        max_tokens: int = 2048,
     ) -> TaskPlan:
         """
         Convert student's natural-language request into a validated TaskPlan.
@@ -219,12 +219,23 @@ class LLMService:
             history_lines.append(f"- Step {step_num}: {act} (target: {tgt}) -> {res}")
         history_summary = "\n".join(history_lines) if history_lines else "None (first action)"
 
+        elements_list = current_page_info.get("elements", [])
+        elem_lines = [
+            f"{e.get('id')}: <{e.get('tag', 'el')}> text='{e.get('text', '')}' role={e.get('role', '')} name='{e.get('name', '')}'"
+            for e in elements_list[:40]
+            if e.get("text") or e.get("placeholder") or e.get("name") or e.get("aria_label")
+        ]
+        elem_str = "\n".join(elem_lines) if elem_lines else "None discovered"
+        tables_json = json.dumps(current_page_info.get("tables", []))[:1200]
+
         prompt = (
             f"Goal: {clean_goal}\n"
             f"Original Request: {clean_request}\n"
             f"Current Page URL: {current_page_info.get('url', '')}\n"
             f"Page Title: {current_page_info.get('title', '')}\n"
-            f"Interactive Elements: {json.dumps(current_page_info.get('interactive', {}))[:1000]}\n"
+            f"Discovered Elements with IDs (use target_element with element ID or text):\n{elem_str}\n"
+            f"Tables on Page (rows & columns):\n{tables_json}\n"
+            f"Interactive Summary: {json.dumps(current_page_info.get('interactive', {}))[:800]}\n"
             f"Page Text Excerpt: {current_page_info.get('text_snippet', '')[:800]}\n"
             f"Recent Actions Executed:\n{history_summary}\n"
             f"Total Steps Taken: {len(previous_actions)}\n"
@@ -236,7 +247,7 @@ class LLMService:
                 {"role": "system", "content": _REASONER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 1000,
+            "max_tokens": 1500,
             "temperature": 0.1,
             "response_format": {"type": "json_object"},
         }

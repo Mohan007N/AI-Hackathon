@@ -481,12 +481,18 @@ class BrowserService:
                     document.querySelectorAll('[data-agent-id]').forEach(el => el.removeAttribute('data-agent-id'));
 
                     const candidates = document.querySelectorAll(
-                        'button, a[href], input, select, textarea, [role="button"], [role="link"], [role="tab"]'
+                        'button, a, input, select, textarea, [role="button"], [role="link"], [role="tab"], [onclick], [data-action], [tabindex], summary, [class*="btn"], [class*="button"], [class*="action"], [class*="more"], [class*="dropdown"], [class*="menu"], [aria-haspopup]'
                     );
 
                     for (const el of candidates) {
                         const style = window.getComputedStyle(el);
-                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0' || el.offsetParent === null) {
+                        const isHidden = (
+                            style.display === 'none' ||
+                            style.visibility === 'hidden' ||
+                            style.opacity === '0' ||
+                            (style.position !== 'fixed' && el.offsetParent === null && el.tagName.toLowerCase() !== 'body')
+                        );
+                        if (isHidden) {
                             continue;
                         }
 
@@ -553,7 +559,10 @@ class BrowserService:
             try:
                 loc = self._page.locator(f"[data-agent-id='{desc}']")
                 if await loc.count() > 0:
-                    await loc.first.click()
+                    try:
+                        await loc.first.click(timeout=3000)
+                    except Exception:
+                        await loc.first.click(force=True, timeout=3000)
                     await self._page.wait_for_load_state("domcontentloaded")
                     try:
                         await self._page.wait_for_load_state("networkidle", timeout=2500)
@@ -583,32 +592,65 @@ class BrowserService:
                 # 1. Try button role
                 btn = self._page.get_by_role("button", name=cand_re)
                 if await btn.count() > 0:
-                    await btn.first.click()
+                    try:
+                        await btn.first.click(timeout=3000)
+                    except Exception:
+                        await btn.first.click(force=True, timeout=3000)
                     await self._page.wait_for_load_state("domcontentloaded")
                     return True
 
                 # 2. Try link role
                 lnk = self._page.get_by_role("link", name=cand_re)
                 if await lnk.count() > 0:
-                    await lnk.first.click()
+                    try:
+                        await lnk.first.click(timeout=3000)
+                    except Exception:
+                        await lnk.first.click(force=True, timeout=3000)
                     await self._page.wait_for_load_state("domcontentloaded")
                     return True
 
                 # 3. Try tab role
                 tab = self._page.get_by_role("tab", name=cand_re)
                 if await tab.count() > 0:
-                    await tab.first.click()
+                    try:
+                        await tab.first.click(timeout=3000)
+                    except Exception:
+                        await tab.first.click(force=True, timeout=3000)
                     return True
 
                 # 4. Fallback to get_by_text
                 txt = self._page.get_by_text(cand_re)
                 if await txt.count() > 0:
-                    await txt.first.click()
+                    try:
+                        await txt.first.click(timeout=3000)
+                    except Exception:
+                        await txt.first.click(force=True, timeout=3000)
                     await self._page.wait_for_load_state("domcontentloaded")
                     return True
             except Exception as exc:
                 logger.debug("Click candidate '%s' failed: %s", cand, exc)
                 continue
+
+        # Row-scoped action button search (e.g. "OE200 More", "OE200 Drop", "Course101 Select")
+        words = desc.split()
+        if len(words) >= 2:
+            row_id = words[0]
+            btn_txt = " ".join(words[1:])
+            try:
+                row_loc = self._page.locator(f"tr:has-text('{row_id}'), div:has-text('{row_id}'), li:has-text('{row_id}')").last
+                if await row_loc.count() > 0:
+                    btn = row_loc.locator(f"button, a, [role='button'], [data-agent-id], :text('{btn_txt}')").filter(
+                        has_text=re.compile(re.escape(btn_txt), re.IGNORECASE)
+                    )
+                    if await btn.count() > 0:
+                        try:
+                            await btn.first.click(timeout=3000)
+                        except Exception:
+                            await btn.first.click(force=True, timeout=3000)
+                        await self._page.wait_for_load_state("domcontentloaded")
+                        return True
+            except Exception as row_err:
+                logger.debug("Row-scoped click for '%s' '%s' failed: %s", row_id, btn_txt, row_err)
 
         logger.warning("Could not locate clickable element for '%s'", description)
         return False
